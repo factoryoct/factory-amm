@@ -37,4 +37,13 @@ chain:
 To check one: compile it with the node's octra_compileAml method and compare
 the sha256 of the bytecode with the code_hash that vm_contract returns for
 the address.
+
+## Privacy
+
+`docs/privacy-on-octra.pdf` is a report on hiding trade amounts and
+participants on this chain: ten approaches taken to a live test on the
+public devnet, and what stopped each one. Four were stopped by platform
+limits, two work but are too slow for a market, one is elegant and removes
+no blocker, one is written but not deployed, two work and are in use. The
+pools in this app are public; nothing here conceals a trade.
     functions       Cloudflare Pages endpoints for /rpc and /price
