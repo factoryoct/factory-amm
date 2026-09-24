@@ -1,0 +1,1138 @@
+contract Pool {
+
+  const OBS_RING: u64 = 4096
+
+  const Q96 = 79228162514264337593543950336
+  const Q128 = 340282366920938463463374607431768211456
+  const Q32 = 4294967296
+  const MAX_UINT256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+  const MIN_TICK = -887272
+  const MAX_TICK = 887272
+  const MIN_SQRT_RATIO = 4295128739
+  const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342
+
+  state {
+    factory:    address
+    token0:     address
+    token1:     address
+    fee:        int
+    tick_spacing: int
+    initialized: int
+
+    sqrt_price_x96: int
+    tick:           int
+    fee_protocol:   int
+    liquidity: u128
+
+    fee_growth_global0_x128: int
+    fee_growth_global1_x128: int
+    protocol_fee0: int
+    protocol_fee1: int
+
+    tick_liquidity_gross:          map[int]u128
+    tick_liquidity_net:            map[int]int
+    tick_fee_growth_outside0_x128: map[int]int
+    tick_fee_growth_outside1_x128: map[int]int
+    tick_initialized:              map[int]int
+
+    tick_bitmap:   map[int]int
+    tick_summary:  map[int]int
+    tick_sqrt:     map[int]int
+
+    position_liquidity:           map[address]map[int]u128
+    position_fee_growth_inside0:  map[address]map[int]int
+    position_fee_growth_inside1:  map[address]map[int]int
+    position_tokens_owed0:        map[address]map[int]int
+    position_tokens_owed1:        map[address]map[int]int
+
+    obs_epoch_last: u64
+    obs_cum:        int
+    obs_e:          map[u64]u64
+    obs_c:          map[u64]int
+    obs_head:       u64
+    obs_len:        u64
+
+    locked: int
+    router: address
+    creator:    address
+    router_set: int
+
+  }
+
+  event Initialize(sqrt_price_x96: int, tick: int)
+  event Mint(sender: address, owner: address, tick_lower: int, tick_upper: int, amount: int, amount0: int, amount1: int)
+  event Burn(owner: address, tick_lower: int, tick_upper: int, amount: int, amount0: int, amount1: int)
+  event Swap(sender: address, recipient: address, amount0: int, amount1: int, sqrt_price_x96: int, liquidity: int, tick: int)
+  event Collect(owner: address, recipient: address, tick_lower: int, tick_upper: int, amount0: int, amount1: int)
+
+  constructor(token0_addr: address, token1_addr: address, fee_val: u64, tick_spacing_val: int, factory_addr: address, router_addr: address, sqrt_price_x96: int, initial_tick: int) {
+    self.factory      = factory_addr
+    self.token0       = token0_addr
+    self.token1       = token1_addr
+    self.fee          = fee_val
+    self.tick_spacing = tick_spacing_val
+    self.router       = router_addr
+    self.sqrt_price_x96 = sqrt_price_x96
+    self.tick         = initial_tick
+    self.initialized  = 1
+    self.router_set   = 1
+    self.locked       = 0
+    self.liquidity    = 0
+    self.fee_growth_global0_x128 = 0
+    self.fee_growth_global1_x128 = 0
+    self.protocol_fee0 = 0
+    self.protocol_fee1 = 0
+
+    self.fee_protocol = 10
+    self.creator      = caller
+  }
+
+  private fn abs_val(x: int): int {
+    if x < 0 { return -x }
+    return x
+  }
+
+  private fn safe_add(left: u128, right: u128): u128 {
+    let out: u128 = left + right
+    require(out >= left, "overflow")
+    return out
+  }
+
+  private fn neg_delta(x: int): int {
+    return -x
+  }
+
+  private fn to_u128(x: int): u128 {
+    require(x >= 0, "NEG")
+    return x
+  }
+
+  private fn to_int(x: u128): int {
+    return x
+  }
+
+  private fn min_int(a: int, b: int): int {
+    if a < b { return a }
+    return b
+  }
+
+  private fn max_int(a: int, b: int): int {
+    if a > b { return a }
+    return b
+  }
+
+  private fn div_round_up(a: int, b: int): int {
+    if a % b == 0 { return a / b }
+    return a / b + 1
+  }
+
+  private fn mul_div_round_up(a: int, b: int, d: int): int {
+    let product = a * b
+    if product % d == 0 { return product / d }
+    return product / d + 1
+  }
+
+  private fn pow2(k: int): int {
+    let b0 = k % 2
+    let b1 = (k / 2) % 2
+    let b2 = (k / 4) % 2
+    let b3 = (k / 8) % 2
+    let b4 = (k / 16) % 2
+    let b5 = (k / 32) % 2
+    let b6 = (k / 64) % 2
+    let b7 = (k / 128) % 2
+    let p0 = b0 * 1 + 1
+    let p1 = b1 * 3 + 1
+    let p2 = b2 * 15 + 1
+    let p3 = b3 * 255 + 1
+    let p4 = b4 * 65535 + 1
+    let p5 = b5 * 4294967295 + 1
+    let p6 = b6 * 18446744073709551615 + 1
+    let p7 = b7 * 340282366920938463463374607431768211455 + 1
+    return p0 * p1 * p2 * p3 * p4 * p5 * p6 * p7
+  }
+
+  private fn finalize_ratio(t: int, r20: int): int {
+    let max_uint = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+    let inv      = max_uint / r20
+    if t > 0 { return inv }
+    return r20
+  }
+
+  private fn apply_bit(r: int, c: int, k: int): int {
+    if c == 1 { return r * k / Q128 }
+    return r
+  }
+
+  private fn get_sqrt_ratio_at_tick(t: int): int {
+    let abs_t = abs_val(t)
+    require(abs_t <= 887272, "T")
+
+    let c1  = (abs_t / 1) % 2
+    let c2  = (abs_t / 2) % 2
+    let c3  = (abs_t / 4) % 2
+    let c4  = (abs_t / 8) % 2
+    let c5  = (abs_t / 16) % 2
+    let c6  = (abs_t / 32) % 2
+    let c7  = (abs_t / 64) % 2
+    let c8  = (abs_t / 128) % 2
+    let c9  = (abs_t / 256) % 2
+    let c10 = (abs_t / 512) % 2
+    let c11 = (abs_t / 1024) % 2
+    let c12 = (abs_t / 2048) % 2
+    let c13 = (abs_t / 4096) % 2
+    let c14 = (abs_t / 8192) % 2
+    let c15 = (abs_t / 16384) % 2
+    let c16 = (abs_t / 32768) % 2
+    let c17 = (abs_t / 65536) % 2
+    let c18 = (abs_t / 131072) % 2
+    let c19 = (abs_t / 262144) % 2
+    let c20 = (abs_t / 524288) % 2
+
+    let r1  = apply_bit(Q128, c1,  340265354078544963557816517032075149313)
+    let r2  = apply_bit(r1,   c2,  340248342086729790484326174814286782778)
+    let r3  = apply_bit(r2,   c3,  340214320654664324051920982716015181260)
+    let r4  = apply_bit(r3,   c4,  340146287995602323631171512101879684304)
+    let r5  = apply_bit(r4,   c5,  340010263488231146823593991679159461444)
+    let r6  = apply_bit(r5,   c6,  339738377640345403697157401104375502016)
+    let r7  = apply_bit(r6,   c7,  339195258003219555707034227454543997025)
+    let r8  = apply_bit(r7,   c8,  338111622100601834656805679988414885971)
+    let r9  = apply_bit(r8,   c9,  335954724994790223023589805789778977700)
+    let r10 = apply_bit(r9,   c10, 331682121138379247127172139078559817300)
+    let r11 = apply_bit(r10,  c11, 323299236684853023288211250268160618739)
+    let r12 = apply_bit(r11,  c12, 307163716377032989948697243942600083920)
+    let r13 = apply_bit(r12,  c13, 277268403626896220163015481526440308287)
+    let r14 = apply_bit(r13,  c14, 225923453940442621947126027127485391333)
+    let r15 = apply_bit(r14,  c15, 149997214084966997727330242082538205943)
+    let r16 = apply_bit(r15,  c16, 66119101136024775622716233608466517926)
+    let r17 = apply_bit(r16,  c17, 12847376062059297516107215508604977152)
+    let r18 = apply_bit(r17,  c18, 484975116602644424853625499134748122)
+    let r19 = apply_bit(r18,  c19, 691415978906521570653435304214168)
+    let r20 = apply_bit(r19,  c20, 1404880482679654955896180642)
+
+    let ratio = finalize_ratio(t, r20)
+    if ratio % Q32 == 0 { return ratio / Q32 }
+    return ratio / Q32 + 1
+  }
+
+  private fn amount0_delta(sqrtA: int, sqrtB: int, liq: int, roundUp: bool): int {
+    let lo  = min_int(sqrtA, sqrtB)
+    let hi  = max_int(sqrtA, sqrtB)
+    let num = liq * Q96 * (hi - lo)
+    if roundUp { return div_round_up(div_round_up(num, hi), lo) }
+    return num / hi / lo
+  }
+
+  private fn amount1_delta(sqrtA: int, sqrtB: int, liq: int, roundUp: bool): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    if roundUp { return mul_div_round_up(liq, hi - lo, Q96) }
+    return liq * (hi - lo) / Q96
+  }
+
+  private fn sqrt_next_ein(sqrtC: int, sqrtT: int, liq: int, amtRem: int, feePips: int, z4o: bool): int {
+    let Q96v = Q96
+    let alf  = amtRem * (1000000 - feePips) / 1000000
+    if z4o {
+      let lo     = min_int(sqrtT, sqrtC)
+      let hi     = max_int(sqrtT, sqrtC)
+      let num    = liq * Q96v * (hi - lo)
+      let max_in = div_round_up(div_round_up(num, hi), lo)
+      if alf >= max_in { return sqrtT }
+      return liq * sqrtC / (liq + alf * sqrtC / Q96v)
+    }
+    let lo     = min_int(sqrtC, sqrtT)
+    let hi     = max_int(sqrtC, sqrtT)
+    let max_in = mul_div_round_up(liq, hi - lo, Q96v)
+    if alf >= max_in { return sqrtT }
+    return sqrtC + alf * Q96v / liq
+  }
+
+  private fn sqrt_next_eout(sqrtC: int, sqrtT: int, liq: int, amtRem: int, z4o: bool): int {
+    let Q96v    = Q96
+    let neg_rem = -amtRem
+    if z4o {
+      let lo      = min_int(sqrtT, sqrtC)
+      let hi      = max_int(sqrtT, sqrtC)
+      let max_out = liq * (hi - lo) / Q96v
+      if neg_rem >= max_out { return sqrtT }
+
+      return sqrtC - div_round_up(neg_rem * Q96v, liq)
+    }
+    let lo      = min_int(sqrtC, sqrtT)
+    let hi      = max_int(sqrtC, sqrtT)
+    let num     = liq * Q96v * (hi - lo)
+    let max_out = num / hi / lo
+    if neg_rem >= max_out { return sqrtT }
+
+    return mul_div_round_up(liq, sqrtC, liq - div_round_up(neg_rem * sqrtC, Q96v))
+  }
+
+  private fn choose_step_in(sqrtNext: int, sqrtC: int, liq: int, z4o: bool): int {
+    if z4o { return amount0_delta(sqrtNext, sqrtC, liq, true) }
+    return amount1_delta(sqrtC, sqrtNext, liq, true)
+  }
+
+  private fn choose_step_out(sqrtNext: int, sqrtC: int, liq: int, z4o: bool): int {
+    if z4o { return amount1_delta(sqrtNext, sqrtC, liq, false) }
+    return amount0_delta(sqrtC, sqrtNext, liq, false)
+  }
+
+  private fn cap_step_out(amtOut: int, amtRem: int, exactIn: bool): int {
+    if exactIn { return amtOut }
+    if amtOut > -amtRem { return -amtRem }
+    return amtOut
+  }
+
+  private fn compute_fee_amt(amtRem: int, amtIn: int, sqrtNext: int, sqrtT: int, feePips: int, exactIn: bool): int {
+    if exactIn && sqrtNext != sqrtT { return amtRem - amtIn }
+    return mul_div_round_up(amtIn, feePips, 1000000 - feePips)
+  }
+
+  private fn compute_swap_step(sqrtC: int, sqrtT: int, liq: int, amtRem: int, feePips: int, z4o: bool): (int, int, int, int) {
+    let exactIn = amtRem >= 0
+    if exactIn {
+      let sqrtNext = sqrt_next_ein(sqrtC, sqrtT, liq, amtRem, feePips, z4o)
+      let amtIn    = choose_step_in(sqrtNext, sqrtC, liq, z4o)
+      let amtOut   = choose_step_out(sqrtNext, sqrtC, liq, z4o)
+      let amtOutF  = cap_step_out(amtOut, amtRem, exactIn)
+      let feeAmt   = compute_fee_amt(amtRem, amtIn, sqrtNext, sqrtT, feePips, exactIn)
+      return (sqrtNext, amtIn, amtOutF, feeAmt)
+    }
+    let sqrtNext = sqrt_next_eout(sqrtC, sqrtT, liq, amtRem, z4o)
+    let amtIn    = choose_step_in(sqrtNext, sqrtC, liq, z4o)
+    let amtOut   = choose_step_out(sqrtNext, sqrtC, liq, z4o)
+    let amtOutF  = cap_step_out(amtOut, amtRem, exactIn)
+    let feeAmt   = compute_fee_amt(amtRem, amtIn, sqrtNext, sqrtT, feePips, exactIn)
+    return (sqrtNext, amtIn, amtOutF, feeAmt)
+  }
+
+  private fn compressed(tick: int): int {
+    let r = tick % self.tick_spacing
+    if r < 0 { return tick / self.tick_spacing - 1 }
+    return tick / self.tick_spacing
+  }
+  private fn bitmap_word(comp: int): int {
+    let r = comp % 256
+    if r < 0 { return comp / 256 - 1 }
+    return comp / 256
+  }
+  private fn bitmap_bit(comp: int): int {
+    let b = comp % 256
+    if b < 0 { return b + 256 }
+    return b
+  }
+
+  private fn update_summary_for_word(word: int) {
+    let sw    = bitmap_word(word)
+    let sb    = bitmap_bit(word)
+    let smask = pow2(sb)
+    let scur  = self.tick_summary[sw]
+    let s_set = (scur / smask) % 2
+    let wv    = self.tick_bitmap[word]
+    if wv > 0 && s_set == 0 { self.tick_summary[sw] = scur + smask }
+    if wv == 0 && s_set != 0 { self.tick_summary[sw] = scur - smask }
+  }
+
+  private fn flip_tick_bitmap(tick: int) {
+    require(tick >= MIN_TICK, "T")
+    let comp   = compressed(tick)
+    let word   = bitmap_word(comp)
+    let bit    = bitmap_bit(comp)
+    let mask   = pow2(bit)
+    let cur    = self.tick_bitmap[word]
+    let is_set = (cur / mask) % 2
+    if is_set == 0 { self.tick_bitmap[word] = cur + mask }
+    if is_set != 0 { self.tick_bitmap[word] = cur - mask }
+    update_summary_for_word(word)
+  }
+
+  private fn sync_tick_bitmap(tick: int) {
+    let gross  = self.tick_liquidity_gross[tick]
+    let comp   = compressed(tick)
+    let word   = bitmap_word(comp)
+    let bit    = bitmap_bit(comp)
+    let mask   = pow2(bit)
+    let cur    = self.tick_bitmap[word]
+    let is_set = (cur / mask) % 2
+    if gross > 0 && is_set == 0 { self.tick_bitmap[word] = cur + mask }
+    if gross == 0 && is_set != 0 { self.tick_bitmap[word] = cur - mask }
+    update_summary_for_word(word)
+  }
+
+  private fn fhl_u256(v: int): int {
+    if v == 0 { return -1 }
+    let p128 = pow2(128)
+    let hi7  = v / p128
+    let b7   = 1 - 1 / (hi7 + 1)
+    let r7   = hi7 * b7 + (v % p128) * (1 - b7)
+    let p64  = pow2(64)
+    let hi6  = r7 / p64
+    let b6   = 1 - 1 / (hi6 + 1)
+    let r6   = hi6 * b6 + (r7 % p64) * (1 - b6)
+    let p32  = pow2(32)
+    let hi5  = r6 / p32
+    let b5   = 1 - 1 / (hi5 + 1)
+    let r5   = hi5 * b5 + (r6 % p32) * (1 - b5)
+    let p16  = pow2(16)
+    let hi4  = r5 / p16
+    let b4   = 1 - 1 / (hi4 + 1)
+    let r4   = hi4 * b4 + (r5 % p16) * (1 - b4)
+    let p8   = pow2(8)
+    let hi3  = r4 / p8
+    let b3   = 1 - 1 / (hi3 + 1)
+    let r3   = hi3 * b3 + (r4 % p8) * (1 - b3)
+    let p4   = pow2(4)
+    let hi2  = r3 / p4
+    let b2   = 1 - 1 / (hi2 + 1)
+    let r2   = hi2 * b2 + (r3 % p4) * (1 - b2)
+    let p2x  = pow2(2)
+    let hi1  = r2 / p2x
+    let b1   = 1 - 1 / (hi1 + 1)
+    let r1   = hi1 * b1 + (r2 % p2x) * (1 - b1)
+    let hi0  = r1 / 2
+    let b0   = 1 - 1 / (hi0 + 1)
+    return b7 * 128 + b6 * 64 + b5 * 32 + b4 * 16 + b3 * 8 + b2 * 4 + b1 * 2 + b0
+  }
+
+  private fn find_bit_lte(word_val: int, bit: int): int {
+    if bit < 0       { return -1 }
+    if word_val == 0 { return -1 }
+    if bit >= 255    { return fhl_u256(word_val) }
+    let masked = word_val % pow2(bit + 1)
+    return fhl_u256(masked)
+  }
+
+  private fn flb_u256(v: int): int {
+    if v == 0 { return -1 }
+    let p128 = pow2(128)
+    let lo7  = v % p128
+    let b7   = 1 - 1 / (lo7 + 1)
+    let r7   = lo7 * b7 + (v / p128) * (1 - b7)
+    let a7   = (1 - b7) * 128
+    let p64  = pow2(64)
+    let lo6  = r7 % p64
+    let b6   = 1 - 1 / (lo6 + 1)
+    let r6   = lo6 * b6 + (r7 / p64) * (1 - b6)
+    let a6   = a7 + (1 - b6) * 64
+    let p32  = pow2(32)
+    let lo5  = r6 % p32
+    let b5   = 1 - 1 / (lo5 + 1)
+    let r5   = lo5 * b5 + (r6 / p32) * (1 - b5)
+    let a5   = a6 + (1 - b5) * 32
+    let p16  = pow2(16)
+    let lo4  = r5 % p16
+    let b4   = 1 - 1 / (lo4 + 1)
+    let r4   = lo4 * b4 + (r5 / p16) * (1 - b4)
+    let a4   = a5 + (1 - b4) * 16
+    let p8   = pow2(8)
+    let lo3  = r4 % p8
+    let b3   = 1 - 1 / (lo3 + 1)
+    let r3   = lo3 * b3 + (r4 / p8) * (1 - b3)
+    let a3   = a4 + (1 - b3) * 8
+    let p4   = pow2(4)
+    let lo2  = r3 % p4
+    let b2   = 1 - 1 / (lo2 + 1)
+    let r2   = lo2 * b2 + (r3 / p4) * (1 - b2)
+    let a2   = a3 + (1 - b2) * 4
+    let p2x  = pow2(2)
+    let lo1  = r2 % p2x
+    let b1   = 1 - 1 / (lo1 + 1)
+    let r1   = lo1 * b1 + (r2 / p2x) * (1 - b1)
+    let a1   = a2 + (1 - b1) * 2
+    let lo0  = r1 % 2
+    let b0   = 1 - 1 / (lo0 + 1)
+    return a1 + (1 - b0)
+  }
+
+  private fn find_bit_gte(word_val: int, bit: int): int {
+    if bit > 255     { return -1 }
+    if word_val == 0 { return -1 }
+    if bit <= 0      { return flb_u256(word_val) }
+    let shifted = word_val / pow2(bit)
+    if shifted == 0  { return -1 }
+    let sub = flb_u256(shifted)
+    if sub < 0 { return -1 }
+    return bit + sub
+  }
+
+  private fn find_prev_in_summary(sw: int, depth: int): (int, int) {
+    if depth <= 0 { return (MIN_TICK, 0) }
+    let sv = self.tick_summary[sw]
+    if sv > 0 {
+      let hsb = find_bit_lte(sv, 255)
+      if hsb >= 0 {
+        let pw = sw * 256 + hsb
+        let hw = find_bit_lte(self.tick_bitmap[pw], 255)
+        if hw >= 0 { return ((pw * 256 + hw) * self.tick_spacing, 1) }
+      }
+    }
+    return find_prev_in_summary(sw - 1, depth - 1)
+  }
+
+  private fn find_next_in_summary(sw: int, depth: int): (int, int) {
+    if depth <= 0 { return (MAX_TICK, 0) }
+    let sv = self.tick_summary[sw]
+    if sv > 0 {
+      let lsb = find_bit_gte(sv, 0)
+      if lsb >= 0 {
+        let nw = sw * 256 + lsb
+        let lw = find_bit_gte(self.tick_bitmap[nw], 0)
+        if lw >= 0 { return ((nw * 256 + lw) * self.tick_spacing, 1) }
+      }
+    }
+    return find_next_in_summary(sw + 1, depth - 1)
+  }
+
+  private fn next_init_tick(tick: int, z4o: bool): (int, int) {
+    let comp = compressed(tick)
+    let word = bitmap_word(comp)
+    let bit  = bitmap_bit(comp)
+    if z4o {
+
+      let hb = find_bit_lte(self.tick_bitmap[word], bit)
+      if hb >= 0 { return ((word * 256 + hb) * self.tick_spacing, 1) }
+
+      let sw  = bitmap_word(word)
+      let sb  = bitmap_bit(word)
+      let hsb = find_bit_lte(self.tick_summary[sw], sb - 1)
+      if hsb >= 0 {
+        let pw = sw * 256 + hsb
+        let hw = find_bit_lte(self.tick_bitmap[pw], 255)
+        if hw >= 0 { return ((pw * 256 + hw) * self.tick_spacing, 1) }
+      }
+
+      return find_prev_in_summary(sw - 1, 2)
+    } else {
+
+      let lb = find_bit_gte(self.tick_bitmap[word], bit + 1)
+      if lb >= 0 { return ((word * 256 + lb) * self.tick_spacing, 1) }
+
+      let sw  = bitmap_word(word)
+      let sb  = bitmap_bit(word)
+      let lsb = find_bit_gte(self.tick_summary[sw], sb + 1)
+      if lsb >= 0 {
+        let nw = sw * 256 + lsb
+        let lw = find_bit_gte(self.tick_bitmap[nw], 0)
+        if lw >= 0 { return ((nw * 256 + lw) * self.tick_spacing, 1) }
+      }
+
+      return find_next_in_summary(sw + 1, 2)
+    }
+  }
+
+  private fn update_tick(t: int, liq_delta: int, upper: bool): bool {
+    let gross_before = self.tick_liquidity_gross[t]
+    let gross_after  = apply_liq_delta(gross_before, liq_delta)
+    let flipped = (gross_after == 0) != (gross_before == 0)
+    if gross_before == 0 {
+
+      if t <= self.tick {
+        self.tick_fee_growth_outside0_x128[t] = self.fee_growth_global0_x128
+        self.tick_fee_growth_outside1_x128[t] = self.fee_growth_global1_x128
+      } else {
+        self.tick_fee_growth_outside0_x128[t] = 0
+        self.tick_fee_growth_outside1_x128[t] = 0
+      }
+      self.tick_initialized[t] = 1
+
+      self.tick_sqrt[t] = get_sqrt_ratio_at_tick(t)
+    }
+    self.tick_liquidity_gross[t] = gross_after
+    if upper { self.tick_liquidity_net[t] = self.tick_liquidity_net[t] - liq_delta }
+    else      { self.tick_liquidity_net[t] = self.tick_liquidity_net[t] + liq_delta }
+    if gross_after == 0 {
+      self.tick_initialized[t]   = 0
+      self.tick_liquidity_net[t] = 0
+    }
+    return flipped
+  }
+
+  private fn cross_tick_internal(t: int, fg0: int, fg1: int): int {
+    self.tick_fee_growth_outside0_x128[t] = fg0 - self.tick_fee_growth_outside0_x128[t]
+    self.tick_fee_growth_outside1_x128[t] = fg1 - self.tick_fee_growth_outside1_x128[t]
+    return self.tick_liquidity_net[t]
+  }
+
+  private fn fee_below0(tc: int, tl: int, fg0: int): int {
+    if tc < tl { return fg0 - self.tick_fee_growth_outside0_x128[tl] }
+    return self.tick_fee_growth_outside0_x128[tl]
+  }
+
+  private fn fee_below1(tc: int, tl: int, fg1: int): int {
+    if tc < tl { return fg1 - self.tick_fee_growth_outside1_x128[tl] }
+    return self.tick_fee_growth_outside1_x128[tl]
+  }
+
+  private fn fee_above0(tc: int, tu: int, fg0: int): int {
+    if tc >= tu { return fg0 - self.tick_fee_growth_outside0_x128[tu] }
+    return self.tick_fee_growth_outside0_x128[tu]
+  }
+
+  private fn fee_above1(tc: int, tu: int, fg1: int): int {
+    if tc >= tu { return fg1 - self.tick_fee_growth_outside1_x128[tu] }
+    return self.tick_fee_growth_outside1_x128[tu]
+  }
+
+  private fn fee_growth_inside(tl: int, tu: int): (int, int) {
+    let tc     = self.tick
+    let fg0    = self.fee_growth_global0_x128
+    let fg1    = self.fee_growth_global1_x128
+    let below0 = fee_below0(tc, tl, fg0)
+    let below1 = fee_below1(tc, tl, fg1)
+    let above0 = fee_above0(tc, tu, fg0)
+    let above1 = fee_above1(tc, tu, fg1)
+    return (fg0 - below0 - above0, fg1 - below1 - above1)
+  }
+
+  private fn pos_key(tl: int, tu: int): int {
+    return (tl + 887272) * 2000000 + (tu + 887272)
+  }
+
+  private fn wrap_u128(delta: int): int {
+    if delta < 0 { return delta + Q128 }
+    return delta
+  }
+
+  private fn apply_liq_delta(cur: u128, delta: int): u128 {
+    if delta >= 0 { return safe_add(cur, to_u128(delta)) }
+    let mag: u128 = to_u128(-delta)
+    require(cur >= mag, "POS")
+    return cur - mag
+  }
+
+  private fn update_position(owner: address, tl: int, tu: int, liq_delta: int): (int, int) {
+    let key    = pos_key(tl, tu)
+    let (fg_in0, fg_in1) = fee_growth_inside(tl, tu)
+    let pos_liq = self.position_liquidity[owner][key]
+    let pos_fg0 = self.position_fee_growth_inside0[owner][key]
+    let pos_fg1 = self.position_fee_growth_inside1[owner][key]
+    let owed0  = to_int(pos_liq) * wrap_u128(fg_in0 - pos_fg0) / Q128
+    let owed1  = to_int(pos_liq) * wrap_u128(fg_in1 - pos_fg1) / Q128
+
+    if liq_delta != 0 {
+      let new_pos_liq = apply_liq_delta(pos_liq, liq_delta)
+      self.position_liquidity[owner][key] = new_pos_liq
+    }
+    self.position_fee_growth_inside0[owner][key] = fg_in0
+    self.position_fee_growth_inside1[owner][key] = fg_in1
+    self.position_tokens_owed0[owner][key] = self.position_tokens_owed0[owner][key] + owed0
+    self.position_tokens_owed1[owner][key] = self.position_tokens_owed1[owner][key] + owed1
+    return (owed0, owed1)
+  }
+
+  private fn mint_amt0(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return amount0_delta(sqrtL, sqrtU, liq, true) }
+    if tc < tu { return amount0_delta(sqrtP,  sqrtU, liq, true) }
+    return 0
+  }
+
+  private fn mint_amt1(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return 0 }
+    if tc < tu { return amount1_delta(sqrtL, sqrtP,  liq, true) }
+    return amount1_delta(sqrtL, sqrtU, liq, true)
+  }
+
+  private fn burn_amt0(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return amount0_delta(sqrtL, sqrtU, liq, false) }
+    if tc < tu { return amount0_delta(sqrtP,  sqrtU, liq, false) }
+    return 0
+  }
+
+  private fn burn_amt1(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return 0 }
+    if tc < tu { return amount1_delta(sqrtL, sqrtP,  liq, false) }
+    return amount1_delta(sqrtL, sqrtU, liq, false)
+  }
+
+  private fn apply_liq_cross(liq: int, liq_net: int, z4o: bool): int {
+
+    if z4o {
+      return liq - liq_net
+    } else {
+      return liq + liq_net
+    }
+  }
+
+  private fn tick_after_cross(tick_next: int, z4o: bool): int {
+    if z4o { return tick_next - 1 }
+    return tick_next
+  }
+
+  private fn select_sqrt_target(sqrt_next: int, limit: int, z4o: bool): int {
+    if z4o { return max_int(sqrt_next, limit) }
+    return min_int(sqrt_next, limit)
+  }
+
+  private fn compute_new_amt_rem(amtRem: int, step_in: int, step_out: int, fee_amt: int, exactIn: bool): int {
+    if exactIn { return amtRem - step_in - fee_amt }
+    return amtRem + step_out
+  }
+
+  private fn compute_new_a0(a0: int, step_in: int, step_out: int, fee_amt: int, z4o: bool): int {
+    if z4o { return a0 + step_in + fee_amt }
+    return a0 - step_out
+  }
+
+  private fn compute_new_a1(a1: int, step_in: int, step_out: int, fee_amt: int, z4o: bool): int {
+    if z4o { return a1 - step_out }
+    return a1 + step_in + fee_amt
+  }
+
+  private fn compute_new_fg0(fg0: int, fee_amt: int, liq: int, z4o: bool): int {
+    if z4o {
+      if liq > 0 { return fg0 + fee_amt * Q128 / liq }
+    }
+    return fg0
+  }
+
+  private fn compute_new_fg1(fg1: int, fee_amt: int, liq: int, z4o: bool): int {
+    if z4o { return fg1 }
+    if liq > 0 { return fg1 + fee_amt * Q128 / liq }
+    return fg1
+  }
+
+  private fn get_liq_net(crossed: bool, init: bool, tick_next: int, fg0: int, fg1: int): int {
+    if crossed && init { return cross_tick_internal(tick_next, fg0, fg1) }
+    return 0
+  }
+
+  private fn get_new_liq(crossed: bool, liq: int, liq_net: int, z4o: bool): int {
+    if crossed { return apply_liq_cross(liq, liq_net, z4o) }
+    return liq
+  }
+
+  private fn get_new_tick(crossed: bool, cur_tick: int, tick_next: int, z4o: bool): int {
+    if crossed { return tick_after_cross(tick_next, z4o) }
+    return cur_tick
+  }
+
+  private fn at_tick_limit(tick: int, z4o: bool): bool {
+    if z4o { return tick < -887272 }
+    return tick > 887272
+  }
+
+  private fn get_sqrt_for_step(tick_next: int, init: bool, limit: int, hint: int): int {
+    if hint > 0 { return hint }
+    if init {
+      let cached = self.tick_sqrt[tick_next]
+      if cached > 0 { return cached }
+      return get_sqrt_ratio_at_tick(tick_next)
+    }
+    return limit
+  }
+
+  private fn protocol_cut(fee_amt: int): int {
+    if self.fee_protocol == 0 { return 0 }
+    return fee_amt / self.fee_protocol
+  }
+
+  private fn add_pf0(pf0: int, prot: int, z4o: bool): int {
+    if z4o { return pf0 + prot }
+    return pf0
+  }
+  private fn add_pf1(pf1: int, prot: int, z4o: bool): int {
+    if z4o { return pf1 }
+    return pf1 + prot
+  }
+
+  private fn do_swap(
+    sqrtP: int, tick: int, liq: int,
+    amtRem: int, a0: int, a1: int,
+    fg0: int, fg1: int, pf0: int, pf1: int,
+    exactIn: bool, z4o: bool, limit: int, hint: int
+  ): (int, int, int, int, int, int, int, int, int) {
+    if amtRem == 0    { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
+    if sqrtP == limit { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
+    if at_tick_limit(tick, z4o) { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
+
+    let (tick_next, init_i) = next_init_tick(tick, z4o)
+
+    if liq == 0 && init_i == 0 { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
+    let sqrt_next   = get_sqrt_for_step(tick_next, init_i != 0, limit, hint)
+    let sqrt_target = select_sqrt_target(sqrt_next, limit, z4o)
+
+    let (new_sqrtP, step_in, step_out, fee_amt) = compute_swap_step(sqrtP, sqrt_target, liq, amtRem, self.fee, z4o)
+
+    let prot   = protocol_cut(fee_amt)
+    let lp_fee = fee_amt - prot
+
+    let new_amtRem = compute_new_amt_rem(amtRem, step_in, step_out, fee_amt, exactIn)
+    let new_a0     = compute_new_a0(a0, step_in, step_out, fee_amt, z4o)
+    let new_a1     = compute_new_a1(a1, step_in, step_out, fee_amt, z4o)
+    let new_fg0    = compute_new_fg0(fg0, lp_fee, liq, z4o)
+    let new_fg1    = compute_new_fg1(fg1, lp_fee, liq, z4o)
+    let new_pf0    = add_pf0(pf0, prot, z4o)
+    let new_pf1    = add_pf1(pf1, prot, z4o)
+
+    let crossed  = new_sqrtP == sqrt_next
+    let liq_net  = get_liq_net(crossed, init_i != 0, tick_next, new_fg0, new_fg1)
+    let new_liq  = get_new_liq(crossed, liq, liq_net, z4o)
+    let new_tick = get_new_tick(crossed, tick, tick_next, z4o)
+
+    return do_swap(new_sqrtP, new_tick, new_liq, new_amtRem, new_a0, new_a1, new_fg0, new_fg1, new_pf0, new_pf1, exactIn, z4o, limit, 0)
+  }
+
+  fn initialize(sqrt_price_x96: int, initial_tick: int) {
+    require(self.initialized == 0, "AI")
+    let min_r = MIN_SQRT_RATIO
+    let max_r = MAX_SQRT_RATIO
+    require(sqrt_price_x96 >= min_r, "R-low")
+    require(sqrt_price_x96 <= max_r, "R-high")
+    let min_t = MIN_TICK
+    let max_t = MAX_TICK
+    require(initial_tick >= min_t, "T-low")
+    require(initial_tick <= max_t, "T-high")
+    self.sqrt_price_x96 = sqrt_price_x96
+    self.tick           = initial_tick
+    self.initialized    = 1
+    emit Initialize(sqrt_price_x96, self.tick)
+  }
+
+  fn set_router(addr: address) {
+    require(caller == self.factory || (caller == self.creator && self.router_set == 0), "AUTH")
+    self.router = addr
+    self.router_set = 1
+  }
+
+  fn mint(recipient: address, tick_lower: int, tick_upper: int, amount: u128, amount0_max: u128, amount1_max: u128): (u128, u128) {
+    require(self.locked == 0,      "LOK")
+    require(self.initialized == 1, "NI")
+    require(amount > 0,            "AM0")
+    require(caller == self.router, "AUTH")
+    require(tick_lower < tick_upper, "TLO")
+    let min_t = MIN_TICK
+    let max_t = MAX_TICK
+    require(tick_lower >= min_t, "TL")
+    require(tick_upper <= max_t, "TU")
+    require(tick_lower % self.tick_spacing == 0, "TS-L")
+    require(tick_upper % self.tick_spacing == 0, "TS-U")
+    self.locked = 1
+
+    let fl = update_tick(tick_lower, amount, false)
+    let fu = update_tick(tick_upper, amount, true)
+    if fl { flip_tick_bitmap(tick_lower) }
+    if fu { flip_tick_bitmap(tick_upper) }
+    sync_tick_bitmap(tick_lower)
+    sync_tick_bitmap(tick_upper)
+    update_position(recipient, tick_lower, tick_upper, amount)
+
+    let sqrtL   = get_sqrt_ratio_at_tick(tick_lower)
+    let sqrtU   = get_sqrt_ratio_at_tick(tick_upper)
+    let tc      = self.tick
+    let sqrtP   = self.sqrt_price_x96
+    let amount0 = mint_amt0(tc, tick_lower, tick_upper, sqrtP, sqrtL, sqrtU, amount)
+    let amount1 = mint_amt1(tc, tick_lower, tick_upper, sqrtP, sqrtL, sqrtU, amount)
+    require(amount0 <= amount0_max, "A0M")
+    require(amount1 <= amount1_max, "A1M")
+
+    if tc >= tick_lower && tc < tick_upper { self.liquidity = safe_add(self.liquidity, amount) }
+
+    emit Mint(caller, recipient, tick_lower, tick_upper, amount, amount0, amount1)
+    self.locked = 0
+    return (amount0, amount1)
+  }
+
+  fn burn(tick_lower: int, tick_upper: int, amount: u128): (u128, u128) {
+    require(self.locked == 0,    "LOK")
+    require(self.initialized == 1, "NI")
+    self.locked = 1
+
+    let neg = neg_delta(amount)
+    let fl = update_tick(tick_lower, neg, false)
+    let fu = update_tick(tick_upper, neg, true)
+    if fl { flip_tick_bitmap(tick_lower) }
+    if fu { flip_tick_bitmap(tick_upper) }
+    update_position(caller, tick_lower, tick_upper, neg)
+
+    let sqrtL   = get_sqrt_ratio_at_tick(tick_lower)
+    let sqrtU   = get_sqrt_ratio_at_tick(tick_upper)
+    let tc      = self.tick
+    let amount0 = burn_amt0(tc, tick_lower, tick_upper, self.sqrt_price_x96, sqrtL, sqrtU, amount)
+    let amount1 = burn_amt1(tc, tick_lower, tick_upper, self.sqrt_price_x96, sqrtL, sqrtU, amount)
+    if tc >= tick_lower && tc < tick_upper {
+      require(self.liquidity >= amount, "LIQ")
+      self.liquidity = self.liquidity - amount
+    }
+
+    if amount0 > 0 || amount1 > 0 {
+      let key = pos_key(tick_lower, tick_upper)
+      self.position_tokens_owed0[caller][key] = self.position_tokens_owed0[caller][key] + amount0
+      self.position_tokens_owed1[caller][key] = self.position_tokens_owed1[caller][key] + amount1
+    }
+
+    emit Burn(caller, tick_lower, tick_upper, amount, amount0, amount1)
+    self.locked = 0
+    return (amount0, amount1)
+  }
+
+  fn collect(recipient: address, tick_lower: int, tick_upper: int, req0: int, req1: int): (int, int) {
+    require(self.locked == 0, "LOK")
+    self.locked = 1
+    let key   = pos_key(tick_lower, tick_upper)
+    let owed0 = self.position_tokens_owed0[caller][key]
+    let owed1 = self.position_tokens_owed1[caller][key]
+    let a0    = min_int(req0, owed0)
+    let a1    = min_int(req1, owed1)
+    if a0 > 0 { self.position_tokens_owed0[caller][key] = owed0 - a0 }
+    if a1 > 0 { self.position_tokens_owed1[caller][key] = owed1 - a1 }
+
+    if a0 > 0 { call(self.token0, "transfer", recipient, a0) }
+    if a1 > 0 { call(self.token1, "transfer", recipient, a1) }
+    emit Collect(caller, recipient, tick_lower, tick_upper, a0, a1)
+    self.locked = 0
+    return (a0, a1)
+  }
+
+  private fn obs_write() {
+    let last = self.obs_epoch_last
+    if last == 0 {
+
+      self.obs_epoch_last = epoch
+      self.obs_cum = 0
+      self.obs_e[0] = epoch
+      self.obs_c[0] = 0
+      self.obs_head = 1
+      self.obs_len = 1
+      return
+    }
+    if epoch <= last { return }
+
+    let lived: int = epoch - last
+    self.obs_cum = self.obs_cum + self.tick * lived
+    self.obs_epoch_last = epoch
+
+    let slot = self.obs_head % OBS_RING
+    self.obs_e[slot] = epoch
+    self.obs_c[slot] = self.obs_cum
+    self.obs_head = self.obs_head + 1
+    if self.obs_len < OBS_RING { self.obs_len = self.obs_len + 1 }
+  }
+
+  fn swap(recipient: address, zero_for_one: u64, amount_specified: int, sqrt_price_limit_x96: u128): (int, int) {
+    require(self.locked == 0,      "LOK")
+    require(self.initialized == 1, "NI")
+    require(amount_specified != 0, "AS0")
+    require(caller == self.router, "AUTH")
+    let zfo = zero_for_one != 0
+    let min_r = MIN_SQRT_RATIO
+    let max_r = MAX_SQRT_RATIO
+    if zero_for_one != 0 {
+      require(sqrt_price_limit_x96 < self.sqrt_price_x96,  "SPL-hi")
+      require(sqrt_price_limit_x96 >= min_r,               "SPL-lo")
+    }
+    if zero_for_one == 0 {
+      require(sqrt_price_limit_x96 > self.sqrt_price_x96,  "SPL-lo")
+      require(sqrt_price_limit_x96 <= max_r,               "SPL-hi")
+    }
+    self.locked = 1
+
+    obs_write()
+
+    let exact_in = amount_specified > 0
+
+    let (fSqrtP, fTick, fLiq, fA0, fA1, fFg0, fFg1, fPf0, fPf1) = do_swap(
+      self.sqrt_price_x96, self.tick, self.liquidity,
+      amount_specified, 0, 0,
+      self.fee_growth_global0_x128, self.fee_growth_global1_x128, 0, 0,
+      exact_in, zfo, sqrt_price_limit_x96, 0
+    )
+
+    let zzTick = zzt_from_sqrt(MIN_TICK, MAX_TICK, fSqrtP, 3)
+
+    let newTick = zzTick
+    if get_sqrt_ratio_at_tick(zzTick) == fSqrtP { newTick = fTick }
+
+    require(newTick > MIN_TICK, "BRICK")
+    require(newTick < MAX_TICK, "BRICK")
+
+    self.sqrt_price_x96          = fSqrtP
+    self.tick                    = newTick
+    self.liquidity               = to_u128(fLiq)
+    self.fee_growth_global0_x128 = fFg0
+    self.fee_growth_global1_x128 = fFg1
+    self.protocol_fee0           = self.protocol_fee0 + fPf0
+    self.protocol_fee1           = self.protocol_fee1 + fPf1
+
+    emit Swap(caller, recipient, fA0, fA1, fSqrtP, fLiq, newTick)
+
+    let out_tok = out_token_addr(zfo)
+    let out_amt = out_amount_signed(fA0, fA1, zfo)
+    if out_amt > 0 {
+      call(out_tok, "transfer", recipient, out_amt)
+    }
+    self.locked = 0
+    return (fA0, fA1)
+  }
+
+  private fn out_token_addr(z4o: bool): address {
+    if z4o { return self.token1 }
+    return self.token0
+  }
+
+  private fn out_amount_signed(a0: int, a1: int, z4o: bool): int {
+    if z4o { return -a1 }
+    return -a0
+  }
+
+  view fn pool_version(): int { return 34 }
+
+  view fn get_slot0(): (int, int, int) {
+    return (self.sqrt_price_x96, self.tick, self.fee_protocol)
+  }
+
+  view fn get_liquidity(): int { return self.liquidity }
+
+  view fn get_tokens(): (address, address) {
+    return (self.token0, self.token1)
+  }
+
+  view fn get_config(): (int, int, address) {
+    return (self.fee, self.tick_spacing, self.factory)
+  }
+
+  view fn get_router(): address { return self.router }
+
+  view fn get_fee_growth(): (int, int) {
+    return (self.fee_growth_global0_x128, self.fee_growth_global1_x128)
+  }
+
+  view fn get_position(owner: address, tick_lower: int, tick_upper: int): (int, int, int) {
+    let key = pos_key(tick_lower, tick_upper)
+    return (
+      self.position_liquidity[owner][key],
+      self.position_tokens_owed0[owner][key],
+      self.position_tokens_owed1[owner][key]
+    )
+  }
+
+  view fn get_tick_data(t: int): (int, int, int) {
+    return (
+      self.tick_liquidity_gross[t],
+      self.tick_liquidity_net[t],
+      self.tick_initialized[t]
+    )
+  }
+
+  view fn get_next_tick(tick: int, z4o_int: int): (int, int) {
+    let (t, init_i) = next_init_tick(tick, z4o_int != 0)
+    if init_i != 0 { return (t, 1) }
+    return (t, 0)
+  }
+
+  view fn twap(window: u64): int {
+    require(window > 0, "W")
+    require(self.obs_len > 0, "NOOBS")
+
+    let since_write: int = epoch - self.obs_epoch_last
+    let now_cum = self.obs_cum + self.tick * since_write
+
+    let target = epoch - window
+    require(target > 0, "WINDOW_TOO_LONG")
+
+    let mut_found = 0
+    let mut_epoch: u64 = 0
+    let mut_cum: int = 0
+    let mut_i: u64 = 0
+    while mut_i < self.obs_len {
+      let slot = (self.obs_head + OBS_RING - 1 - mut_i) % OBS_RING
+      let e = self.obs_e[slot]
+      if e <= target {
+        mut_found = 1
+        mut_epoch = e
+        mut_cum = self.obs_c[slot]
+        mut_i = self.obs_len
+      }
+      if mut_found == 0 { mut_i = mut_i + 1 }
+    }
+
+    require(mut_found == 1, "NO_HISTORY")
+
+    let span: int = epoch - mut_epoch
+    require(span > 0, "SPAN")
+    return (now_cum - mut_cum) / span
+  }
+
+  view fn obs_info(): (u64, u64, u64) {
+    if self.obs_len == 0 { return (0, 0, 0) }
+    let oldest_slot = (self.obs_head + OBS_RING - self.obs_len) % OBS_RING
+    return (self.obs_len, self.obs_e[oldest_slot], self.obs_epoch_last)
+  }
+
+  view fn now(): u64 { return epoch }
+
+  view fn obs_at(back: u64): (u64, int) {
+    require(back < self.obs_len, "RANGE")
+    let slot = (self.obs_head + OBS_RING - 1 - back) % OBS_RING
+    return (self.obs_e[slot], self.obs_c[slot])
+  }
+
+  view fn get_bitmap_word(word: int): int {
+    return self.tick_bitmap[word]
+  }
+
+  view fn get_sqrt_at_tick(tick: int): int {
+    return get_sqrt_ratio_at_tick(tick)
+  }
+
+  view fn get_pending_fees(owner: address, tick_lower: int, tick_upper: int): (int, int) {
+    let key     = pos_key(tick_lower, tick_upper)
+    let pos_liq = self.position_liquidity[owner][key]
+    if pos_liq == 0 { return (0, 0) }
+    let (fg_in0, fg_in1) = fee_growth_inside(tick_lower, tick_upper)
+    let pos_fg0 = self.position_fee_growth_inside0[owner][key]
+    let pos_fg1 = self.position_fee_growth_inside1[owner][key]
+    let pending0 = to_int(pos_liq) * wrap_u128(fg_in0 - pos_fg0) / Q128
+    let pending1 = to_int(pos_liq) * wrap_u128(fg_in1 - pos_fg1) / Q128
+    let total0   = self.position_tokens_owed0[owner][key] + pending0
+    let total1   = self.position_tokens_owed1[owner][key] + pending1
+    return (total0, total1)
+  }
+
+  fn set_fee_protocol(new_fee: u64) {
+    require(caller == self.factory, "F")
+
+    require(new_fee == 0 || (new_fee >= 2 && new_fee <= 10), "FP")
+    self.fee_protocol = new_fee
+  }
+
+  fn collect_protocol(recipient: address): (int, int) {
+    require(caller == self.factory, "F")
+    let a0 = self.protocol_fee0
+    let a1 = self.protocol_fee1
+    self.protocol_fee0 = 0
+    self.protocol_fee1 = 0
+    if a0 > 0 { call(self.token0, "transfer", recipient, a0) }
+    if a1 > 0 { call(self.token1, "transfer", recipient, a1) }
+    return (a0, a1)
+  }
+
+  view fn get_protocol_fees(): (int, int) {
+    return (self.protocol_fee0, self.protocol_fee1)
+  }
+
+  private fn zzt_step(lo: int, hi: int, sqrtP: int): (int, int) {
+    if lo >= hi { return (lo, hi) }
+    let mid = lo + (hi - lo + 1) / 2
+    if get_sqrt_ratio_at_tick(mid) <= sqrtP { return (mid, hi) }
+    return (lo, mid - 1)
+  }
+
+  private fn zzt_from_sqrt(lo: int, hi: int, sqrtP: int, depth: int): int {
+    if lo >= hi    { return lo }
+    if depth <= 0  { return lo }
+    let (l1,  h1)  = zzt_step(lo,  hi,  sqrtP)
+    let (l2,  h2)  = zzt_step(l1,  h1,  sqrtP)
+    let (l3,  h3)  = zzt_step(l2,  h2,  sqrtP)
+    let (l4,  h4)  = zzt_step(l3,  h3,  sqrtP)
+    let (l5,  h5)  = zzt_step(l4,  h4,  sqrtP)
+    let (l6,  h6)  = zzt_step(l5,  h5,  sqrtP)
+    let (l7,  h7)  = zzt_step(l6,  h6,  sqrtP)
+    let (l8,  h8)  = zzt_step(l7,  h7,  sqrtP)
+    let (l9,  h9)  = zzt_step(l8,  h8,  sqrtP)
+    let (l10, h10) = zzt_step(l9,  h9,  sqrtP)
+    let (l11, h11) = zzt_step(l10, h10, sqrtP)
+    return zzt_from_sqrt(l11, h11, sqrtP, depth - 1)
+  }
+
+}

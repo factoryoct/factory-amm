@@ -1,0 +1,269 @@
+contract Router {
+
+  state {
+    factory: address
+    quoter:  address
+  }
+
+  event SwapExecuted(sender: address, recipient: address, token_in: address, token_out: address, amount_in: int, amount_out: int)
+  event LiquidityAdded(sender: address, pool: address, recipient: address, amount0: int, amount1: int)
+
+  constructor(factory_addr: address, quoter_addr: address) {
+    self.factory = factory_addr
+    self.quoter  = quoter_addr
+  }
+
+
+
+  const Q96 = 79228162514264337593543950336
+
+  private fn abs_val(x: int): int {
+    if x < 0 { return -x }
+    return x
+  }
+
+  private fn min_int(a: int, b: int): int {
+    if a < b { return a }
+    return b
+  }
+
+  private fn max_int(a: int, b: int): int {
+    if a > b { return a }
+    return b
+  }
+
+  
+  private fn div_round_up(a: int, b: int): int {
+    if a % b == 0 { return a / b }
+    return a / b + 1
+  }
+
+  private fn mul_div_round_up(a: int, b: int, d: int): int {
+    let product = a * b
+    if product % d == 0 { return product / d }
+    return product / d + 1
+  }
+
+  private fn amount0_up(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    return div_round_up(div_round_up(liq * Q96 * (hi - lo), hi), lo)
+  }
+
+  private fn amount1_up(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    return mul_div_round_up(liq, hi - lo, Q96)
+  }
+
+
+  private fn need0(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return amount0_up(sqrtL, sqrtU, liq) }
+    if tc < tu { return amount0_up(sqrtP, sqrtU, liq) }
+    return 0
+  }
+
+  private fn need1(tc: int, tl: int, tu: int, sqrtP: int, sqrtL: int, sqrtU: int, liq: int): int {
+    if tc < tl { return 0 }
+    if tc < tu { return amount1_up(sqrtL, sqrtP, liq) }
+    return amount1_up(sqrtL, sqrtU, liq)
+  }
+
+
+  private fn bounded_limit(z4o: bool, passed: int, cur_sqrt: int): int {
+    if passed != 0 { return passed }
+    if z4o {
+      let lim = cur_sqrt / 32
+      if lim <= 4295128740 { return 4295128740 }
+      return lim
+    }
+    let up = cur_sqrt * 32
+    if up >= 1461446703485210103287273052203988822378723970341 { return 1461446703485210103287273052203988822378723970341 }
+    return up
+  }
+
+
+  private fn bool_to_int(b: bool): int {
+    if b { return 1 }
+    return 0
+  }
+
+  private fn out_amount(raw0: int, raw1: int, zero_for_one: bool): int {
+    if zero_for_one { return abs_val(raw1) }
+    return abs_val(raw0)
+  }
+
+
+  private fn in_amount(raw0: int, raw1: int, zero_for_one: bool): int {
+    if zero_for_one { return abs_val(raw0) }
+    return abs_val(raw1)
+  }
+
+
+  private fn part(s: string, k: u64): string {
+    let rest = s
+    let i: u64 = 0
+    while i <= k {
+      
+      let h = index_of(rest, "#")
+      require(h > 0, "PART")
+      let ln = to_int(substr(rest, 0, h))
+      require(ln >= 0, "PART-LEN")
+      require(h + 1 + ln <= len(rest), "PART-OVER")
+      if i == k { return substr(rest, h + 1, ln) }
+      let skip = h + 1 + ln
+      rest = substr(rest, skip, len(rest) - skip)
+      i = i + 1
+    }
+    return ""
+  }
+
+
+  private fn find_pool(token0: address, token1: address, fee: int): string {
+    require(to_int(call(self.factory, "has_canonical_pool", token0, token1, fee)) == 1, "NO_POOL")
+    return call(self.factory, "get_canonical", token0, token1, fee)
+  }
+
+
+
+  fn add_liquidity(
+    pool:        address,
+    recipient:   address,
+    tick_lower:  int,
+    tick_upper:  int,
+    amount:      u128,
+    amount0_max: u128,
+    amount1_max: u128
+  ): (int, int) {
+    require(amount > 0, "AM0")
+    let tk = call(pool, "get_tokens")
+    let token0 = part(tk, 0)
+    let token1 = part(tk, 1)
+
+    
+    let cfg = call(pool, "get_config")
+    let pool_fee = to_int(part(cfg, 0))
+    require(to_int(call(self.factory, "has_canonical_pool", token0, token1, pool_fee)) == 1, "NO_POOL")
+    require(call(self.factory, "get_canonical", token0, token1, pool_fee) == to_string(pool), "NOT_CANON")
+
+    
+    let slot0 = call(pool, "get_slot0")
+    let sqrtP = to_int(part(slot0, 0))
+    let tc    = to_int(part(slot0, 1))
+    let sqrtL = to_int(call(pool, "get_sqrt_at_tick", tick_lower))
+    let sqrtU = to_int(call(pool, "get_sqrt_at_tick", tick_upper))
+    let want0 = need0(tc, tick_lower, tick_upper, sqrtP, sqrtL, sqrtU, amount)
+    let want1 = need1(tc, tick_lower, tick_upper, sqrtP, sqrtL, sqrtU, amount)
+    require(want0 <= amount0_max, "A0M")
+    require(want1 <= amount1_max, "A1M")
+
+
+    if want0 > 0 {
+      call(token0, "pull", caller, pool, want0)
+    }
+    if want1 > 0 {
+      call(token1, "pull", caller, pool, want1)
+    }
+    let minted = call(pool, "mint", recipient, tick_lower, tick_upper, amount, want0, want1)
+    let a0 = to_int(part(minted, 0))
+    let a1 = to_int(part(minted, 1))
+    emit LiquidityAdded(caller, pool, recipient, a0, a1)
+    return (a0, a1)
+  }
+
+
+
+  fn exact_input_single(
+    token_in:           address,
+    token_out:          address,
+    fee:                u64,
+    recipient:          address,
+    deadline:           u64,
+    amount_in:          u128,
+    amount_out_minimum: u128,
+    sqrt_price_limit:   int
+  ): int {
+    require(epoch <= deadline, "DL")
+    require(amount_in > 0, "AI")
+    require(fee > 0, "FEE")
+
+    let pool         = find_pool(token_in, token_out, fee)
+    let ptk          = call(pool, "get_tokens")
+    let zero_for_one = to_string(token_in) == part(ptk, 0)
+    let slot0        = call(pool, "get_slot0")
+    let cur_sqrt     = to_int(part(slot0, 0))
+    let limit        = bounded_limit(zero_for_one, sqrt_price_limit, cur_sqrt)
+    let zfo_int      = bool_to_int(zero_for_one)
+
+    call(token_in, "pull", caller, pool, amount_in)
+
+    let swapped = call(pool, "swap", recipient, zfo_int, amount_in, limit)
+    let raw0 = to_int(part(swapped, 0))
+    let raw1 = to_int(part(swapped, 1))
+
+    let amount_out = out_amount(raw0, raw1, zero_for_one)
+
+    
+    require(amount_out > 0, "OUT0")
+
+    
+    require(in_amount(raw0, raw1, zero_for_one) == to_int(amount_in), "PART")
+
+    require(amount_out >= amount_out_minimum, "SL")
+
+    emit SwapExecuted(caller, recipient, token_in, token_out, amount_in, amount_out)
+    return amount_out
+  }
+
+
+  fn exact_output_single(
+    token_in:           address,
+    token_out:          address,
+    fee:                u64,
+    recipient:          address,
+    deadline:           u64,
+    amount_out:         u128,
+    amount_in_maximum:  u128,
+    sqrt_price_limit:   int
+  ): int {
+    require(epoch <= deadline, "DL")
+    require(amount_out > 0,    "AO")
+    require(fee > 0,           "FEE")
+    require(amount_in_maximum > 0, "AIM")
+
+    let pool         = find_pool(token_in, token_out, fee)
+    let ptk          = call(pool, "get_tokens")
+    let zero_for_one = to_string(token_in) == part(ptk, 0)
+    let slot0        = call(pool, "get_slot0")
+    let cur_sqrt     = to_int(part(slot0, 0))
+    let limit        = bounded_limit(zero_for_one, sqrt_price_limit, cur_sqrt)
+    let zfo_int      = bool_to_int(zero_for_one)
+
+    
+    let quoted = to_int(call(self.quoter, "quote_exact_output_single", token_in, token_out, fee, amount_out, limit))
+    require(quoted > 0, "Q0")
+    let amount_in = quoted + quoted / 100000 + 16
+    require(amount_in <= amount_in_maximum, "SL")
+
+    call(token_in, "pull", caller, pool, amount_in)
+
+
+    let swapped = call(pool, "swap", recipient, zfo_int, amount_in, limit)
+    let raw0 = to_int(part(swapped, 0))
+    let raw1 = to_int(part(swapped, 1))
+
+    let delivered = out_amount(raw0, raw1, zero_for_one)
+    require(delivered >= amount_out, "OUT")
+
+    emit SwapExecuted(caller, recipient, token_in, token_out, amount_in, delivered)
+    return amount_in
+  }
+
+  view fn get_factory(): address {
+    return self.factory
+  }
+
+  view fn get_quoter(): address {
+    return self.quoter
+  }
+}

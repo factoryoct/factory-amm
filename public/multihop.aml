@@ -1,0 +1,50 @@
+contract MultiHop {
+
+  state {
+    router: address
+  }
+
+  event MultiHopExecuted(sender: address, recipient: address, token_in: address, token_out: address, amount_in: int, amount_out: int)
+
+  constructor(router_addr: address) {
+    self.router = router_addr
+  }
+
+
+  fn exact_input_double(
+    token_in:           address,
+    fee1:               u64,
+    mid:                address,
+    fee2:               u64,
+    token_out:          address,
+    recipient:          address,
+    deadline:           int,
+    amount_in:          u128,
+    amount_out_minimum: u128
+  ): int {
+    require(amount_in > 0, "AI")
+    require(fee1 > 0, "F1")
+    require(fee2 > 0, "F2")
+
+
+    call(token_in, "pull", caller, self_addr, amount_in)
+
+
+    call(token_in, "grant", self.router, amount_in)
+    let mid_out = to_int(call(self.router, "exact_input_single", token_in, mid, fee1, self_addr, deadline, amount_in, 0, 0))
+    require(mid_out > 0, "H1")
+
+
+    call(mid, "grant", self.router, mid_out)
+    let final_out = to_int(call(self.router, "exact_input_single", mid, token_out, fee2, recipient, deadline, mid_out, amount_out_minimum, 0))
+
+    require(final_out > 0, "OUT0")
+
+    emit MultiHopExecuted(caller, recipient, token_in, token_out, amount_in, final_out)
+    return final_out
+  }
+
+  view fn get_router(): address {
+    return self.router
+  }
+}

@@ -1,0 +1,77 @@
+contract WOCT {
+
+  invariant supply_conserved = sum(balances) == total_supply
+
+  state {
+    balances:     map[address]u128
+    allowance:    map[address]map[address]u128
+    total_supply: u128
+  }
+
+  event Deposit(sender: address, amount: u128)
+  event Withdrawal(sender: address, amount: u128)
+  event Transfer(from: address, to: address, amount: u128)
+  event Approval(owner: address, spender: address, amount: u128)
+
+  constructor() {
+  }
+
+  private fn safe_add(left: u128, right: u128): u128 {
+    let out: u128 = left + right
+    require(out >= left, "overflow")
+    return out
+  }
+
+  fn deposit() {
+    let amt: u128 = value
+    require(amt > 0, "AMT")
+    self.balances[caller]  = safe_add(self.balances[caller], amt)
+    self.total_supply      = safe_add(self.total_supply, amt)
+    emit Deposit(caller, amt)
+  }
+
+  fn withdraw(amount: u128) {
+    require(amount > 0, "AMT")
+    let bal = self.balances[caller]
+    require(bal >= amount, "BAL")
+    let sup = self.total_supply
+    require(sup >= amount, "SUPPLY")
+    self.balances[caller] = bal - amount
+    self.total_supply     = sup - amount
+    require(transfer(caller, amount), "XFER")
+    emit Withdrawal(caller, amount)
+  }
+
+  fn transfer(to: address, amount: u128) {
+    require(amount > 0, "AMT")
+    let bal = self.balances[caller]
+    require(bal >= amount, "BAL")
+    self.balances[caller] = bal - amount
+    self.balances[to]     = safe_add(self.balances[to], amount)
+    emit Transfer(caller, to, amount)
+  }
+
+  fn pull(from: address, to: address, amount: u128) {
+    require(amount > 0, "AMT")
+    let bal = self.balances[from]
+    require(bal >= amount, "BAL")
+    let allowed = self.allowance[from][caller]
+    require(allowed >= amount, "ALLW")
+    self.allowance[from][caller] = allowed - amount
+    self.balances[from]          = bal - amount
+    self.balances[to]            = safe_add(self.balances[to], amount)
+    emit Transfer(from, to, amount)
+  }
+
+  fn grant(to: address, amount: u128) {
+    self.allowance[caller][to] = amount
+    emit Approval(caller, to, amount)
+  }
+
+  view fn balance_of(owner: address): u128 { return self.balances[owner] }
+  view fn allowance_of(owner: address, spender: address): u128 { return self.allowance[owner][spender] }
+  view fn total_supply(): u128 { return self.total_supply }
+  view fn get_symbol(): string { return "OCT" }
+  view fn get_name(): string { return "Octra" }
+  view fn decimals(): u64 { return 6 }
+}

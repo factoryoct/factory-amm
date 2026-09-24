@@ -1,0 +1,49 @@
+contract SwapHelper {
+
+  state {
+    router: address
+    woct:   address
+  }
+
+  event SwapToNative(sender: address, recipient: address, token_in: address, amount_in: int, oct_out: int)
+
+  constructor(router_addr: address, woct_addr: address) {
+    self.router = router_addr
+    self.woct   = woct_addr
+  }
+
+
+  fn swap_to_native(
+    token_in:           address,
+    fee:                u64,
+    recipient:          address,
+    deadline:           u64,
+    amount_in:          u128,
+    amount_out_minimum: u128
+  ): int {
+    require(amount_in > 0, "AI")
+    require(fee > 0, "FEE")
+    require(deadline > 0, "DL")
+
+
+    call(token_in, "pull", caller, self_addr, amount_in)
+
+
+    call(token_in, "grant", self.router, amount_in)
+    let oct_out = to_int(call(self.router, "exact_input_single", token_in, self.woct, fee, self_addr, deadline, amount_in, 0, 0))
+
+    require(oct_out > 0, "OUT0")
+    require(oct_out >= amount_out_minimum, "SL")
+
+
+    call(self.woct, "withdraw", oct_out)
+    require(transfer(recipient, oct_out), "XFER")
+
+    emit SwapToNative(caller, recipient, token_in, amount_in, oct_out)
+    return oct_out
+  }
+
+  view fn get_router(): address {
+    return self.router
+  }
+}

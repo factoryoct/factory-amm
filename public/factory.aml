@@ -1,0 +1,124 @@
+contract Factory {
+
+  state {
+    owner:       address
+    pool_count:  u64
+
+    pool_addresses: map[u64]address
+    pool_token0:    map[u64]address
+    pool_token1:    map[u64]address
+    pool_fee:       map[u64]u64
+
+    fee_tick_spacing: map[u64]u64
+
+
+    canonical:     map[address]map[address]map[u64]address
+    has_canonical: map[address]map[address]map[u64]u64
+  }
+
+  event PoolCreated(token0: address, token1: address, fee: u64, tick_spacing: u64, pool: address, pool_index: u64)
+  event FeeAmountEnabled(fee: u64, tick_spacing: u64)
+  event OwnerChanged(old_owner: address, new_owner: address)
+
+  constructor() {
+    self.owner      = caller
+
+
+    self.fee_tick_spacing[500]   = 10
+    self.fee_tick_spacing[3000]  = 60
+    self.fee_tick_spacing[10000] = 200
+  }
+
+
+  fn register_pool(pool_addr: address, token0: address, token1: address, fee: u64) {
+    require(fee > 0, "FEE-POS")
+    require(self.fee_tick_spacing[fee] != 0, "FEE")
+    require(token0 != token1, "SAME")
+
+    let idx = self.pool_count
+    self.pool_addresses[idx] = pool_addr
+    self.pool_token0[idx]    = token0
+    self.pool_token1[idx]    = token1
+    self.pool_fee[idx]       = fee
+    self.pool_count          = idx + 1
+
+
+    if self.has_canonical[token0][token1][fee] == 0 {
+      self.canonical[token0][token1][fee] = pool_addr
+      self.canonical[token1][token0][fee] = pool_addr
+      self.has_canonical[token0][token1][fee] = 1
+      self.has_canonical[token1][token0][fee] = 1
+    }
+
+    let ts = self.fee_tick_spacing[fee]
+    emit PoolCreated(token0, token1, fee, ts, pool_addr, idx)
+  }
+
+
+  view fn get_canonical(token_a: address, token_b: address, fee: u64): address {
+    require(fee > 0, "FEE-POS")
+    return self.canonical[token_a][token_b][fee]
+  }
+  view fn has_canonical_pool(token_a: address, token_b: address, fee: u64): u64 {
+    require(fee > 0, "FEE-POS")
+    return self.has_canonical[token_a][token_b][fee]
+  }
+
+  fn enable_fee_amount(fee: u64, tick_spacing: u64) {
+    require(caller == self.owner,      "OWN")
+    require(fee > 0,                   "FEE-POS")
+    require(fee < 1000000,             "FEE-MAX")
+    require(tick_spacing > 0,          "TS-POS")
+    require(tick_spacing < 16384,      "TS-MAX")
+    require(self.fee_tick_spacing[fee] == 0, "FEE-EXISTS")
+    self.fee_tick_spacing[fee] = tick_spacing
+    emit FeeAmountEnabled(fee, tick_spacing)
+  }
+
+  fn set_owner(new_owner: address) {
+    require(caller == self.owner, "OWN")
+    emit OwnerChanged(self.owner, new_owner)
+    self.owner = new_owner
+  }
+
+
+  fn set_pool_fee_protocol(pool: address, new_fee: u64) {
+    require(caller == self.owner, "OWN")
+
+    require(new_fee == 0 || (new_fee >= 2 && new_fee <= 10), "FP")
+    call(pool, "set_fee_protocol", new_fee)
+  }
+
+
+  fn set_pool_router(pool: address, router_addr: address) {
+    require(caller == self.owner, "OWN")
+    call(pool, "set_router", router_addr)
+  }
+
+  fn collect_pool_protocol(pool: address, recipient: address) {
+    require(caller == self.owner, "OWN")
+    call(pool, "collect_protocol", recipient)
+  }
+
+  
+  view fn get_owner(): address {
+    return self.owner
+  }
+
+  view fn get_pool_count(): u64 {
+    return self.pool_count
+  }
+
+  view fn get_pool_at(idx: u64): address {
+    return self.pool_addresses[idx]
+  }
+
+  view fn get_pool_info(idx: u64): (address, address, u64) {
+    return (self.pool_token0[idx], self.pool_token1[idx], self.pool_fee[idx])
+  }
+
+  view fn get_fee_tick_spacing(fee: u64): u64 {
+    require(fee > 0, "FEE-POS")
+    return self.fee_tick_spacing[fee]
+  }
+}

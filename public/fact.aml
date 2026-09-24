@@ -1,0 +1,70 @@
+contract FACT {
+
+  invariant supply_conserved = sum(balances) == total_supply
+
+  state {
+    admin:        address
+    balances:     map[address]u128
+    allowance:    map[address]map[address]u128
+    total_supply: u128
+  }
+
+  event Transfer(from: address, to: address, amount: u128)
+  event Approval(owner: address, spender: address, amount: u128)
+  event Mint(to: address, amount: u128)
+
+  constructor() {
+    self.admin = caller
+  }
+
+  private fn safe_add(left: u128, right: u128): u128 {
+    let out: u128 = left + right
+    require(out >= left, "overflow")
+    return out
+  }
+
+  fn mint(to: address, amount: u128): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    require(amount > 0, "AMT")
+    self.balances[to]  = safe_add(self.balances[to], amount)
+    self.total_supply  = safe_add(self.total_supply, amount)
+    emit Mint(to, amount)
+    return true
+  }
+
+  fn transfer(to: address, amount: u128): bool {
+    require(amount > 0, "AMT")
+    let bal = self.balances[caller]
+    require(bal >= amount, "BAL")
+    self.balances[caller] = bal - amount
+    self.balances[to]     = safe_add(self.balances[to], amount)
+    emit Transfer(caller, to, amount)
+    return true
+  }
+
+  fn pull(from: address, to: address, amount: u128): bool {
+    require(amount > 0, "AMT")
+    let bal = self.balances[from]
+    require(bal >= amount, "BAL")
+    let allowed = self.allowance[from][caller]
+    require(allowed >= amount, "ALLW")
+    self.allowance[from][caller] = allowed - amount
+    self.balances[from]          = bal - amount
+    self.balances[to]            = safe_add(self.balances[to], amount)
+    emit Transfer(from, to, amount)
+    return true
+  }
+
+  fn grant(to: address, amount: u128): bool {
+    self.allowance[caller][to] = amount
+    emit Approval(caller, to, amount)
+    return true
+  }
+
+  view fn balance_of(owner: address): u128 { return self.balances[owner] }
+  view fn allowance_of(owner: address, spender: address): u128 { return self.allowance[owner][spender] }
+  view fn total_supply(): u128 { return self.total_supply }
+  view fn get_symbol(): string { return "FACT" }
+  view fn get_name(): string { return "Factory Token" }
+  view fn decimals(): u64 { return 6 }
+}

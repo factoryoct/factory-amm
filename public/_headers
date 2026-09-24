@@ -1,0 +1,12 @@
+# Netlify cache headers. The HTML entry must always be revalidated so a new deploy is
+# picked up immediately (it references the hashed JS/CSS by new filenames). The hashed
+# build assets are content-addressed and immutable, so they can cache forever.
+
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

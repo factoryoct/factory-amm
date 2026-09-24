@@ -1,0 +1,98 @@
+contract Faucet {
+
+  state {
+    admin:       address
+    token:       address
+    oct_amount:  u128
+    fact_amount: u128
+    cooldown:    u64
+    allowed:     map[address]u64
+    last_claim:  map[address]u64
+  }
+
+  event Allowed(addr: address)
+  event Funded(by: address, oct: u128)
+  event Claimed(to: address, oct_amount: u128, fact_amount: u128)
+
+  constructor(token: address, oct_amount: u128, fact_amount: u128, cooldown: u64) {
+    require(oct_amount > 0, "OCT_AMT")
+    require(fact_amount > 0, "FACT_AMT")
+    self.admin       = caller
+    self.token       = token
+    self.oct_amount  = oct_amount
+    self.fact_amount = fact_amount
+    self.cooldown    = cooldown
+  }
+
+  private fn safe_add(left: u64, right: u64): u64 {
+    let out: u64 = left + right
+    require(out >= left, "overflow")
+    return out
+  }
+
+  fn allow(addr: address): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    self.allowed[addr] = 1
+    emit Allowed(addr)
+    return true
+  }
+
+  fn disallow(addr: address): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    self.allowed[addr] = 0
+    return true
+  }
+
+  fn set_amounts(oct_amount: u128, fact_amount: u128): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    require(oct_amount > 0, "OCT_AMT")
+    require(fact_amount > 0, "FACT_AMT")
+    self.oct_amount  = oct_amount
+    self.fact_amount = fact_amount
+    return true
+  }
+
+  fn set_cooldown(cooldown: u64): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    self.cooldown = cooldown
+    return true
+  }
+
+  fn fund_oct(): bool {
+    require(value > 0, "NO_OCT")
+    emit Funded(caller, value)
+    return true
+  }
+
+  fn withdraw_oct(amount: u128): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    require(amount > 0, "AMT")
+    require(transfer(self.admin, amount), "XFER")
+    return true
+  }
+
+  fn withdraw_fact(amount: u128): bool {
+    require(caller == self.admin, "NOT_ADMIN")
+    require(amount > 0, "AMT")
+    call(self.token, "transfer", self.admin, amount)
+    return true
+  }
+
+  fn claim(): bool {
+    require(epoch >= safe_add(self.last_claim[caller], self.cooldown), "COOLDOWN")
+    self.last_claim[caller] = epoch
+    require(transfer(caller, self.oct_amount), "XFER")
+    call(self.token, "transfer", caller, self.fact_amount)
+    emit Claimed(caller, self.oct_amount, self.fact_amount)
+    return true
+  }
+
+  view fn is_allowed(addr: address): u64       { return self.allowed[addr] }
+  view fn last_claim_of(addr: address): u64    { return self.last_claim[addr] }
+  view fn next_claim_epoch(addr: address): u64 { return safe_add(self.last_claim[addr], self.cooldown) }
+  view fn cooldown_epochs(): u64               { return self.cooldown }
+  view fn admin_addr(): address                { return self.admin }
+  view fn token_addr(): address                { return self.token }
+  view fn oct_per_claim(): u128                { return self.oct_amount }
+  view fn fact_per_claim(): u128               { return self.fact_amount }
+}

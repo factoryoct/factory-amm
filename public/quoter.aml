@@ -1,0 +1,379 @@
+contract Quoter {
+
+  state {
+    factory: address
+  }
+
+  constructor(factory_addr: address) {
+    self.factory = factory_addr
+  }
+
+
+
+  private fn Q96(): int { return 79228162514264337593543950336 }
+
+
+
+  private fn abs_val(x: int): int {
+    if x < 0 { return -x }
+    return x
+  }
+  private fn min_int(a: int, b: int): int {
+    if a < b { return a }
+    return b
+  }
+  private fn max_int(a: int, b: int): int {
+    if a > b { return a }
+    return b
+  }
+  private fn div_round_up(a: int, b: int): int {
+    if a % b == 0 { return a / b }
+    return a / b + 1
+  }
+  private fn mul_div_round_up(a: int, b: int, d: int): int {
+    let product = a * b
+    if product % d == 0 { return product / d }
+    return product / d + 1
+  }
+
+
+
+  private fn amount0_delta(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    return liq * Q96() * (hi - lo) / hi / lo
+  }
+  private fn amount1_delta(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    return liq * (hi - lo) / Q96()
+  }
+  private fn amount0_delta_up(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo  = min_int(sqrtA, sqrtB)
+    let hi  = max_int(sqrtA, sqrtB)
+    let num = liq * Q96() * (hi - lo)
+    return div_round_up(div_round_up(num, hi), lo)
+  }
+  private fn amount1_delta_up(sqrtA: int, sqrtB: int, liq: int): int {
+    let lo = min_int(sqrtA, sqrtB)
+    let hi = max_int(sqrtA, sqrtB)
+    return mul_div_round_up(liq, hi - lo, Q96())
+  }
+
+
+
+  private fn step_in_amt(sqrtNew: int, sqrtP: int, liq: int, z4o: bool): int {
+    if z4o { return amount0_delta_up(sqrtNew, sqrtP, liq) }
+    return amount1_delta_up(sqrtP, sqrtNew, liq)
+  }
+  private fn step_out_amt(sqrtNew: int, sqrtP: int, liq: int, z4o: bool): int {
+    if z4o { return amount1_delta(sqrtNew, sqrtP, liq) }
+    return amount0_delta(sqrtP, sqrtNew, liq)
+  }
+
+
+
+  private fn sqrt_next_ein(sqrtP: int, sqrtT: int, liq: int, amtRem: int, feePips: int, z4o: bool): int {
+    let Q96v = Q96()
+    let alf  = amtRem * (1000000 - feePips) / 1000000
+    if z4o {
+      let lo     = min_int(sqrtT, sqrtP)
+      let hi     = max_int(sqrtT, sqrtP)
+      let num    = liq * Q96v * (hi - lo)
+      let max_in = div_round_up(div_round_up(num, hi), lo)
+      if alf >= max_in { return sqrtT }
+      return liq * sqrtP / (liq + alf * sqrtP / Q96v)
+    }
+    let lo     = min_int(sqrtP, sqrtT)
+    let hi     = max_int(sqrtP, sqrtT)
+    let max_in = mul_div_round_up(liq, hi - lo, Q96v)
+    if alf >= max_in { return sqrtT }
+    return sqrtP + alf * Q96v / liq
+  }
+
+
+
+  private fn clamp_sqrt(sqrt_next: int, limit: int, z4o: bool): int {
+    if z4o { return max_int(sqrt_next, limit) }
+    return min_int(sqrt_next, limit)
+  }
+
+  private fn fee_for_step(amtRem: int, s_in: int, new_sqrtP: int, sqrtT: int, feePips: int): int {
+    if new_sqrtP != sqrtT { return amtRem - s_in }
+    return mul_div_round_up(s_in, feePips, 1000000 - feePips)
+  }
+
+  private fn b2i(b: bool): int {
+    if b { return 1 }
+    return 0
+  }
+
+
+  private fn part(s: string, k: u64): string {
+    let rest = s
+    let i: u64 = 0
+    while i <= k {
+      let h = index_of(rest, "#")
+      let ln = to_int(substr(rest, 0, h))
+      if i == k { return substr(rest, h + 1, ln) }
+      let skip = h + 1 + ln
+      rest = substr(rest, skip, len(rest) - skip)
+      i = i + 1
+    }
+    return ""
+  }
+
+
+  private fn get_step_sqrt(pool: string, tick_next: int, init_i: int, limit: int): int {
+    if init_i == 1 { return to_int(call(pool, "get_sqrt_at_tick", tick_next)) }
+    return limit
+  }
+
+  private fn liq_after_cross(liq: int, liq_net: int, z4o: bool): int {
+
+    if z4o {
+      return liq - liq_net
+    } else {
+      return liq + liq_net
+    }
+  }
+  private fn tick_after_cross(tick_next: int, z4o: bool): int {
+    if z4o { return tick_next - 1 }
+    return tick_next
+  }
+
+
+  private fn do_cross(pool: string, crossed: bool, liq: int, tick: int, tick_next: int, z4o: bool): (int, int) {
+    if crossed {
+      let td = call(pool, "get_tick_data", tick_next)
+      let liq_net = to_int(part(td, 1))
+      return (liq_after_cross(liq, liq_net, z4o), tick_after_cross(tick_next, z4o))
+    }
+    return (liq, tick)
+  }
+
+
+
+  private fn get_limit(z4o: bool, sqrt_price_limit: int): int {
+    if z4o {
+      if sqrt_price_limit == 0 { return 4295128740 }
+      return sqrt_price_limit
+    }
+    if sqrt_price_limit == 0 { return 1461446703485210103287273052203988822378723970341 }
+    return sqrt_price_limit
+  }
+
+
+
+  private fn sim_loop(
+    pool:   string,
+    sqrtP:  int,
+    tick:   int,
+    liq:    int,
+    amtRem: int,
+    accOut: int,
+    z4o:    bool,
+    limit:  int,
+    fee:    int,
+    depth:  int
+  ): (int, int) {
+    if amtRem <= 0  { return (accOut, sqrtP) }
+    if sqrtP == limit { return (accOut, sqrtP) }
+    if liq <= 0     { return (accOut, sqrtP) }
+    if depth <= 0   { return (accOut, sqrtP) }
+
+    let nt = call(pool, "get_next_tick", tick, b2i(z4o))
+    let tick_next = to_int(part(nt, 0))
+    let init_i = to_int(part(nt, 1))
+    let sqrt_next  = get_step_sqrt(pool, tick_next, init_i, limit)
+    let sqrtT      = clamp_sqrt(sqrt_next, limit, z4o)
+    let new_sqrtP  = sqrt_next_ein(sqrtP, sqrtT, liq, amtRem, fee, z4o)
+    let s_in       = step_in_amt(new_sqrtP, sqrtP, liq, z4o)
+    let s_out      = step_out_amt(new_sqrtP, sqrtP, liq, z4o)
+    let f_amt      = fee_for_step(amtRem, s_in, new_sqrtP, sqrtT, fee)
+    let new_amtRem = amtRem - s_in - f_amt
+    let new_accOut = accOut + s_out
+
+    let crossed = (new_sqrtP == sqrt_next) && (init_i == 1)
+    let (new_liq, new_tick) = do_cross(pool, crossed, liq, tick, tick_next, z4o)
+
+    return sim_loop(pool, new_sqrtP, new_tick, new_liq, new_amtRem, new_accOut, z4o, limit, fee, depth - 1)
+  }
+
+
+
+
+  private fn find_pool(t0: string, t1: string, fee: int): string {
+    require(to_int(call(self.factory, "has_canonical_pool", t0, t1, fee)) == 1, "NO_POOL")
+    return call(self.factory, "get_canonical", t0, t1, fee)
+  }
+
+
+
+  private fn quote_single_impl(
+    token_in:         string,
+    token_out:        string,
+    fee:              int,
+    amount_in:        int,
+    sqrt_price_limit: int
+  ): (int, int, int) {
+    let pool                = find_pool(token_in, token_out, fee)
+    let ptk                 = call(pool, "get_tokens")
+    let zero_for_one        = token_in == part(ptk, 0)
+    let slot0               = call(pool, "get_slot0")
+    let sqrtP               = to_int(part(slot0, 0))
+    let tick                = to_int(part(slot0, 1))
+    let liq                 = to_int(call(pool, "get_liquidity"))
+    require(liq > 0, "NL")
+
+    let limit               = get_limit(zero_for_one, sqrt_price_limit)
+    let (out, final_sqrt)   = sim_loop(pool, sqrtP, tick, liq, amount_in, 0, zero_for_one, limit, fee, 8)
+    let price_impact        = abs_val(final_sqrt - sqrtP) * 10000 / sqrtP
+
+    return (out, final_sqrt, price_impact)
+  }
+
+
+
+  view fn quote_exact_input_single(
+    token_in:         address,
+    token_out:        address,
+    fee:              u64,
+    amount_in:        u128,
+    sqrt_price_limit: int
+  ): (int, int, int) {
+    require(fee > 0, "FEE")
+    require(amount_in > 0, "AMT")
+    let fee_i: int = fee
+    let amt_i: int = amount_in
+    return quote_single_impl(to_string(token_in), to_string(token_out), fee_i, amt_i, sqrt_price_limit)
+  }
+
+  private fn do_quote_hops(
+    path:       list[address],
+    path_len:   int,
+    i:          int,
+    current_in: int
+  ): int {
+    if i >= path_len - 2 { return current_in }
+    let token_in        = call(path, "get", i)
+    let pool_addr       = call(path, "get", i + 1)
+    let token_out       = call(path, "get", i + 2)
+    let cfg  = call(pool_addr, "get_config")
+    let pfee = to_int(part(cfg, 0))
+    let (out, sqrt_out, impact) = quote_single_impl(token_in, token_out, pfee, current_in, 0)
+    return do_quote_hops(path, path_len, i + 2, out)
+  }
+
+
+
+
+  private fn sqrt_next_eout(sqrtC: int, sqrtT: int, liq: int, amtRem: int, z4o: bool): int {
+    let Q96v    = Q96()
+    let neg_rem = 0 - amtRem
+    if z4o {
+      let lo      = min_int(sqrtT, sqrtC)
+      let hi      = max_int(sqrtT, sqrtC)
+      let max_out = liq * (hi - lo) / Q96v
+      if neg_rem >= max_out { return sqrtT }
+
+      return sqrtC - div_round_up(neg_rem * Q96v, liq)
+    }
+    let lo      = min_int(sqrtC, sqrtT)
+    let hi      = max_int(sqrtC, sqrtT)
+    let num     = liq * Q96v * (hi - lo)
+    let max_out = num / hi / lo
+    if neg_rem >= max_out { return sqrtT }
+
+    return mul_div_round_up(liq, sqrtC, liq - div_round_up(neg_rem * sqrtC, Q96v))
+  }
+
+
+  private fn cap_out(amtOut: int, amtRem: int): int {
+    let rem = 0 - amtRem
+    if amtOut > rem { return rem }
+    return amtOut
+  }
+
+
+  private fn sim_out_loop(
+    pool:   string,
+    sqrtP:  int,
+    tick:   int,
+    liq:    int,
+    amtRem: int,
+    accIn:  int,
+    z4o:    bool,
+    limit:  int,
+    fee:    int,
+    depth:  int
+  ): (int, int) {
+    if amtRem == 0  { return (accIn, sqrtP) }
+    if sqrtP == limit { return (accIn, sqrtP) }
+    if liq <= 0     { return (accIn, sqrtP) }
+    if depth <= 0   { return (accIn, sqrtP) }
+
+    let nt = call(pool, "get_next_tick", tick, b2i(z4o))
+    let tick_next = to_int(part(nt, 0))
+    let init_i = to_int(part(nt, 1))
+    let sqrt_next  = get_step_sqrt(pool, tick_next, init_i, limit)
+    let sqrtT      = clamp_sqrt(sqrt_next, limit, z4o)
+    let new_sqrtP  = sqrt_next_eout(sqrtP, sqrtT, liq, amtRem, z4o)
+    let s_in       = step_in_amt(new_sqrtP, sqrtP, liq, z4o)
+    let s_out      = step_out_amt(new_sqrtP, sqrtP, liq, z4o)
+    let s_out_c    = cap_out(s_out, amtRem)
+    let f_amt      = mul_div_round_up(s_in, fee, 1000000 - fee)
+    let new_amtRem = amtRem + s_out_c
+    let new_accIn  = accIn + s_in + f_amt
+
+    let crossed = (new_sqrtP == sqrt_next) && (init_i == 1)
+    let (new_liq, new_tick) = do_cross(pool, crossed, liq, tick, tick_next, z4o)
+
+    return sim_out_loop(pool, new_sqrtP, new_tick, new_liq, new_amtRem, new_accIn, z4o, limit, fee, depth - 1)
+  }
+
+  private fn quote_out_impl(
+    token_in:         string,
+    token_out:        string,
+    fee:              int,
+    amount_out:       int,
+    sqrt_price_limit: int
+  ): int {
+    let pool                = find_pool(token_in, token_out, fee)
+    let ptk                 = call(pool, "get_tokens")
+    let zero_for_one        = token_in == part(ptk, 0)
+    let slot0               = call(pool, "get_slot0")
+    let sqrtP               = to_int(part(slot0, 0))
+    let tick                = to_int(part(slot0, 1))
+    let liq                 = to_int(call(pool, "get_liquidity"))
+    require(liq > 0, "NL")
+
+    let limit               = get_limit(zero_for_one, sqrt_price_limit)
+    let neg_out             = 0 - amount_out
+    let (accIn, final_sqrt) = sim_out_loop(pool, sqrtP, tick, liq, neg_out, 0, zero_for_one, limit, fee, 8)
+    return accIn
+  }
+
+
+  view fn quote_exact_output_single(
+    token_in:         address,
+    token_out:        address,
+    fee:              u64,
+    amount_out:       u128,
+    sqrt_price_limit: int
+  ): int {
+    require(fee > 0, "FEE")
+    require(amount_out > 0, "AMT")
+    let fee_i: int = fee
+    let out_i: int = amount_out
+    return quote_out_impl(to_string(token_in), to_string(token_out), fee_i, out_i, sqrt_price_limit)
+  }
+
+  view fn get_factory(): address {
+    return self.factory
+  }
+
+  view fn get_quoter(): address {
+    return self_addr
+  }
+}
