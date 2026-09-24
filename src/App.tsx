@@ -18,7 +18,6 @@ const AddLiquidity = lazy(() => import('./pages/AddLiquidity'))
 const MyPositions  = lazy(() => import('./pages/MyPositions'))
 const Leaderboard  = lazy(() => import('./pages/Leaderboard'))
 const Protocol     = lazy(() => import('./pages/Protocol'))
-const Admin        = lazy(() => import('./pages/Admin'))
 
 function SpoofedAddresses() {
   const names = spoofedAddresses()
@@ -105,12 +104,12 @@ function Shell() {
             <Route path="/positions"               element={<MyPositions />} />
             <Route path="/leaderboard"             element={<Leaderboard />} />
             <Route path="/protocol"                element={<Protocol />} />
-            <Route path="/admin"                   element={<Admin />} />
             <Route path="/launchpad"               element={<Navigate to="/" replace />} />
             <Route path="/vault"                   element={<Navigate to="/" replace />} />
             <Route path="/private"                 element={<Navigate to="/" replace />} />
             <Route path="/inbox"                   element={<Navigate to="/" replace />} />
             <Route path="/faucet"                  element={<Navigate to="/" replace />} />
+            <Route path="*"                        element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>
         </main>
