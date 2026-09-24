@@ -6,6 +6,9 @@ contract Pool {
   const Q128 = 340282366920938463463374607431768211456
   const Q32 = 4294967296
   const MAX_UINT256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+
+  const SWAP_STEPS = 4
+
   const MIN_TICK = -887272
   const MAX_TICK = 887272
   const MIN_SQRT_RATIO = 4295128739
@@ -28,6 +31,9 @@ contract Pool {
     fee_growth_global1_x128: int
     protocol_fee0: int
     protocol_fee1: int
+
+    reserve0: int
+    reserve1: int
 
     tick_liquidity_gross:          map[int]u128
     tick_liquidity_net:            map[int]int
@@ -66,6 +72,16 @@ contract Pool {
   event Collect(owner: address, recipient: address, tick_lower: int, tick_upper: int, amount0: int, amount1: int)
 
   constructor(token0_addr: address, token1_addr: address, fee_val: u64, tick_spacing_val: int, factory_addr: address, router_addr: address, sqrt_price_x96: int, initial_tick: int) {
+
+    require(token0_addr != token1_addr, "SAME")
+    require(tick_spacing_val > 0, "TS")
+    require(sqrt_price_x96 >= MIN_SQRT_RATIO, "P-LO")
+    require(sqrt_price_x96 <= MAX_SQRT_RATIO, "P-HI")
+    require(initial_tick > MIN_TICK, "T-LO")
+    require(initial_tick < MAX_TICK, "T-HI")
+    require(get_sqrt_ratio_at_tick(initial_tick) <= sqrt_price_x96, "T-P")
+    require(sqrt_price_x96 < get_sqrt_ratio_at_tick(initial_tick + 1), "T-P")
+
     self.factory      = factory_addr
     self.token0       = token0_addr
     self.token1       = token1_addr
@@ -82,6 +98,8 @@ contract Pool {
     self.fee_growth_global1_x128 = 0
     self.protocol_fee0 = 0
     self.protocol_fee1 = 0
+    self.reserve0      = 0
+    self.reserve1      = 0
 
     self.fee_protocol = 10
     self.creator      = caller
@@ -740,11 +758,13 @@ contract Pool {
     sqrtP: int, tick: int, liq: int,
     amtRem: int, a0: int, a1: int,
     fg0: int, fg1: int, pf0: int, pf1: int,
-    exactIn: bool, z4o: bool, limit: int, hint: int
+    exactIn: bool, z4o: bool, limit: int, hint: int, steps: int
   ): (int, int, int, int, int, int, int, int, int) {
     if amtRem == 0    { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
     if sqrtP == limit { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
     if at_tick_limit(tick, z4o) { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
+
+    if steps <= 0 { return (sqrtP, tick, liq, a0, a1, fg0, fg1, pf0, pf1) }
 
     let (tick_next, init_i) = next_init_tick(tick, z4o)
 
@@ -770,7 +790,7 @@ contract Pool {
     let new_liq  = get_new_liq(crossed, liq, liq_net, z4o)
     let new_tick = get_new_tick(crossed, tick, tick_next, z4o)
 
-    return do_swap(new_sqrtP, new_tick, new_liq, new_amtRem, new_a0, new_a1, new_fg0, new_fg1, new_pf0, new_pf1, exactIn, z4o, limit, 0)
+    return do_swap(new_sqrtP, new_tick, new_liq, new_amtRem, new_a0, new_a1, new_fg0, new_fg1, new_pf0, new_pf1, exactIn, z4o, limit, 0, steps - 1)
   }
 
   fn initialize(sqrt_price_x96: int, initial_tick: int) {
@@ -826,6 +846,11 @@ contract Pool {
     require(amount0 <= amount0_max, "A0M")
     require(amount1 <= amount1_max, "A1M")
 
+    require(to_int(call(self.token0, "balance_of", self_addr)) >= self.reserve0 + amount0, "PAY0")
+    require(to_int(call(self.token1, "balance_of", self_addr)) >= self.reserve1 + amount1, "PAY1")
+    self.reserve0 = self.reserve0 + amount0
+    self.reserve1 = self.reserve1 + amount1
+
     if tc >= tick_lower && tc < tick_upper { self.liquidity = safe_add(self.liquidity, amount) }
 
     emit Mint(caller, recipient, tick_lower, tick_upper, amount, amount0, amount1)
@@ -877,8 +902,8 @@ contract Pool {
     if a0 > 0 { self.position_tokens_owed0[caller][key] = owed0 - a0 }
     if a1 > 0 { self.position_tokens_owed1[caller][key] = owed1 - a1 }
 
-    if a0 > 0 { call(self.token0, "transfer", recipient, a0) }
-    if a1 > 0 { call(self.token1, "transfer", recipient, a1) }
+    if a0 > 0 { self.reserve0 = self.reserve0 - a0  call(self.token0, "transfer", recipient, a0) }
+    if a1 > 0 { self.reserve1 = self.reserve1 - a1  call(self.token1, "transfer", recipient, a1) }
     emit Collect(caller, recipient, tick_lower, tick_upper, a0, a1)
     self.locked = 0
     return (a0, a1)
@@ -935,7 +960,7 @@ contract Pool {
       self.sqrt_price_x96, self.tick, self.liquidity,
       amount_specified, 0, 0,
       self.fee_growth_global0_x128, self.fee_growth_global1_x128, 0, 0,
-      exact_in, zfo, sqrt_price_limit_x96, 0
+      exact_in, zfo, sqrt_price_limit_x96, 0, SWAP_STEPS
     )
 
     let zzTick = zzt_from_sqrt(MIN_TICK, MAX_TICK, fSqrtP, 3)
@@ -953,6 +978,14 @@ contract Pool {
     self.fee_growth_global1_x128 = fFg1
     self.protocol_fee0           = self.protocol_fee0 + fPf0
     self.protocol_fee1           = self.protocol_fee1 + fPf1
+
+    if zfo { require(to_int(call(self.token0, "balance_of", self_addr)) >= self.reserve0 + fA0, "PAYIN") }
+    if zfo == false { require(to_int(call(self.token1, "balance_of", self_addr)) >= self.reserve1 + fA1, "PAYIN") }
+    self.reserve0 = self.reserve0 + fA0
+    self.reserve1 = self.reserve1 + fA1
+
+    require(self.reserve0 >= 0, "RES0")
+    require(self.reserve1 >= 0, "RES1")
 
     emit Swap(caller, recipient, fA0, fA1, fSqrtP, fLiq, newTick)
 
@@ -1102,8 +1135,8 @@ contract Pool {
     let a1 = self.protocol_fee1
     self.protocol_fee0 = 0
     self.protocol_fee1 = 0
-    if a0 > 0 { call(self.token0, "transfer", recipient, a0) }
-    if a1 > 0 { call(self.token1, "transfer", recipient, a1) }
+    if a0 > 0 { self.reserve0 = self.reserve0 - a0  call(self.token0, "transfer", recipient, a0) }
+    if a1 > 0 { self.reserve1 = self.reserve1 - a1  call(self.token1, "transfer", recipient, a1) }
     return (a0, a1)
   }
 

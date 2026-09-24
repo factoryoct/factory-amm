@@ -108,7 +108,6 @@ function Shell() {
             <Route path="/vault"                   element={<Navigate to="/" replace />} />
             <Route path="/private"                 element={<Navigate to="/" replace />} />
             <Route path="/inbox"                   element={<Navigate to="/" replace />} />
-            <Route path="/faucet"                  element={<Navigate to="/" replace />} />
             <Route path="*"                        element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>

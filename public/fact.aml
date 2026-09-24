@@ -1,9 +1,11 @@
-contract FACT {
+contract FACT2 {
 
   invariant supply_conserved = sum(balances) == total_supply
 
   state {
     admin:        address
+    admin_gone:   u64
+    max_supply:   u128
     balances:     map[address]u128
     allowance:    map[address]map[address]u128
     total_supply: u128
@@ -12,9 +14,14 @@ contract FACT {
   event Transfer(from: address, to: address, amount: u128)
   event Approval(owner: address, spender: address, amount: u128)
   event Mint(to: address, amount: u128)
+  event AdminChanged(old_admin: address, new_admin: address)
+  event AdminRenounced(by: address, final_supply: u128)
 
-  constructor() {
-    self.admin = caller
+  constructor(cap: u128) {
+    require(cap > 0, "CAP")
+    self.admin      = caller
+    self.admin_gone = 0
+    self.max_supply = cap
   }
 
   private fn safe_add(left: u128, right: u128): u128 {
@@ -24,11 +31,30 @@ contract FACT {
   }
 
   fn mint(to: address, amount: u128): bool {
+    require(self.admin_gone == 0, "CLOSED")
     require(caller == self.admin, "NOT_ADMIN")
     require(amount > 0, "AMT")
+    let after = safe_add(self.total_supply, amount)
+    require(after <= self.max_supply, "CAP")
     self.balances[to]  = safe_add(self.balances[to], amount)
-    self.total_supply  = safe_add(self.total_supply, amount)
+    self.total_supply  = after
     emit Mint(to, amount)
+    return true
+  }
+
+  fn set_admin(new_admin: address): bool {
+    require(self.admin_gone == 0, "CLOSED")
+    require(caller == self.admin, "NOT_ADMIN")
+    emit AdminChanged(self.admin, new_admin)
+    self.admin = new_admin
+    return true
+  }
+
+  fn renounce_admin(): bool {
+    require(self.admin_gone == 0, "CLOSED")
+    require(caller == self.admin, "NOT_ADMIN")
+    self.admin_gone = 1
+    emit AdminRenounced(caller, self.total_supply)
     return true
   }
 
@@ -64,6 +90,9 @@ contract FACT {
   view fn balance_of(owner: address): u128 { return self.balances[owner] }
   view fn allowance_of(owner: address, spender: address): u128 { return self.allowance[owner][spender] }
   view fn total_supply(): u128 { return self.total_supply }
+  view fn max_supply(): u128 { return self.max_supply }
+  view fn admin_addr(): address { return self.admin }
+  view fn mint_closed(): u64 { return self.admin_gone }
   view fn get_symbol(): string { return "FACT" }
   view fn get_name(): string { return "Factory Token" }
   view fn decimals(): u64 { return 6 }

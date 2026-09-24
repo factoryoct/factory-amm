@@ -1,9 +1,12 @@
-contract Factory {
+contract Factory3 {
 
   state {
     owner:       address
-    pool_count:  u64
+    router:      address
+    pool_code:   string
+    code_locked: u64
 
+    pool_count:  u64
     pool_addresses: map[u64]address
     pool_token0:    map[u64]address
     pool_token1:    map[u64]address
@@ -11,29 +14,65 @@ contract Factory {
 
     fee_tick_spacing: map[u64]u64
 
-
     canonical:     map[address]map[address]map[u64]address
     has_canonical: map[address]map[address]map[u64]u64
+
+    mine: map[address]u64
   }
 
   event PoolCreated(token0: address, token1: address, fee: u64, tick_spacing: u64, pool: address, pool_index: u64)
   event FeeAmountEnabled(fee: u64, tick_spacing: u64)
   event OwnerChanged(old_owner: address, new_owner: address)
+  event CodeLocked(length: u64)
+  event CanonicalChanged(token0: address, token1: address, fee: u64, old_pool: address, new_pool: address)
 
   constructor() {
-    self.owner      = caller
-
-
+    self.owner       = caller
+    self.router      = caller
+    self.pool_code   = ""
+    self.code_locked = 0
+    self.pool_count  = 0
     self.fee_tick_spacing[500]   = 10
     self.fee_tick_spacing[3000]  = 60
     self.fee_tick_spacing[10000] = 200
   }
 
+  fn append_code(chunk: string) {
+    require(caller == self.owner, "OWN")
+    require(self.code_locked == 0, "LOCKED")
+    self.pool_code = concat(self.pool_code, chunk)
+  }
 
-  fn register_pool(pool_addr: address, token0: address, token1: address, fee: u64) {
-    require(fee > 0, "FEE-POS")
-    require(self.fee_tick_spacing[fee] != 0, "FEE")
+  fn lock_code() {
+    require(caller == self.owner, "OWN")
+    require(len(self.pool_code) > 0, "EMPTY")
+    self.code_locked = 1
+    emit CodeLocked(len(self.pool_code))
+  }
+
+  fn set_router(addr: address) {
+    require(caller == self.owner, "OWN")
+    self.router = addr
+  }
+
+  fn create_pool(token0: address, token1: address, fee: u64, sqrt_price_x96: int, initial_tick: int): address {
+    require(self.code_locked == 1, "CODE")
     require(token0 != token1, "SAME")
+    require(fee > 0, "FEE-POS")
+    let ts = self.fee_tick_spacing[fee]
+    require(ts != 0, "FEE")
+    require(self.has_canonical[token0][token1][fee] == 0, "EXISTS")
+
+    let code   = self.pool_code
+    let a0     = token0
+    let a1     = token1
+    let f      = fee
+    let ts_i   = to_int(ts)
+    let fact   = self_addr
+    let rout   = self.router
+    let price  = sqrt_price_x96
+    let tick0  = initial_tick
+    let pool_addr = deploy(code, a0, a1, f, ts_i, fact, rout, price, tick0)
 
     let idx = self.pool_count
     self.pool_addresses[idx] = pool_addr
@@ -42,18 +81,29 @@ contract Factory {
     self.pool_fee[idx]       = fee
     self.pool_count          = idx + 1
 
+    self.mine[pool_addr] = 1
+    self.canonical[token0][token1][fee] = pool_addr
+    self.canonical[token1][token0][fee] = pool_addr
+    self.has_canonical[token0][token1][fee] = 1
+    self.has_canonical[token1][token0][fee] = 1
 
-    if self.has_canonical[token0][token1][fee] == 0 {
-      self.canonical[token0][token1][fee] = pool_addr
-      self.canonical[token1][token0][fee] = pool_addr
-      self.has_canonical[token0][token1][fee] = 1
-      self.has_canonical[token1][token0][fee] = 1
-    }
-
-    let ts = self.fee_tick_spacing[fee]
     emit PoolCreated(token0, token1, fee, ts, pool_addr, idx)
+    return pool_addr
   }
 
+  fn set_canonical(token0: address, token1: address, fee: u64, pool_addr: address) {
+    require(caller == self.owner, "OWN")
+    require(self.mine[pool_addr] == 1, "NOT-MINE")
+    require(token0 != token1, "SAME")
+    require(self.fee_tick_spacing[fee] != 0, "FEE")
+    emit CanonicalChanged(token0, token1, fee, self.canonical[token0][token1][fee], pool_addr)
+    self.canonical[token0][token1][fee] = pool_addr
+    self.canonical[token1][token0][fee] = pool_addr
+    self.has_canonical[token0][token1][fee] = 1
+    self.has_canonical[token1][token0][fee] = 1
+  }
+
+  view fn is_mine(pool_addr: address): u64 { return self.mine[pool_addr] }
 
   view fn get_canonical(token_a: address, token_b: address, fee: u64): address {
     require(fee > 0, "FEE-POS")
@@ -63,6 +113,17 @@ contract Factory {
     require(fee > 0, "FEE-POS")
     return self.has_canonical[token_a][token_b][fee]
   }
+  view fn get_pool_count(): u64 { return self.pool_count }
+  view fn get_pool_at(idx: u64): address { return self.pool_addresses[idx] }
+  view fn get_pool_info(idx: u64): (address, address, u64) {
+    return (self.pool_token0[idx], self.pool_token1[idx], self.pool_fee[idx])
+  }
+  view fn get_fee_tick_spacing(fee: u64): u64 { return self.fee_tick_spacing[fee] }
+  view fn get_owner(): address { return self.owner }
+  view fn get_self(): address { return self_addr }
+  view fn get_router(): address { return self.router }
+  view fn code_length(): u64 { return len(self.pool_code) }
+  view fn is_code_locked(): u64 { return self.code_locked }
 
   fn enable_fee_amount(fee: u64, tick_spacing: u64) {
     require(caller == self.owner,      "OWN")
@@ -81,14 +142,11 @@ contract Factory {
     self.owner = new_owner
   }
 
-
   fn set_pool_fee_protocol(pool: address, new_fee: u64) {
     require(caller == self.owner, "OWN")
-
     require(new_fee == 0 || (new_fee >= 2 && new_fee <= 10), "FP")
     call(pool, "set_fee_protocol", new_fee)
   }
-
 
   fn set_pool_router(pool: address, router_addr: address) {
     require(caller == self.owner, "OWN")
@@ -98,27 +156,5 @@ contract Factory {
   fn collect_pool_protocol(pool: address, recipient: address) {
     require(caller == self.owner, "OWN")
     call(pool, "collect_protocol", recipient)
-  }
-
-  
-  view fn get_owner(): address {
-    return self.owner
-  }
-
-  view fn get_pool_count(): u64 {
-    return self.pool_count
-  }
-
-  view fn get_pool_at(idx: u64): address {
-    return self.pool_addresses[idx]
-  }
-
-  view fn get_pool_info(idx: u64): (address, address, u64) {
-    return (self.pool_token0[idx], self.pool_token1[idx], self.pool_fee[idx])
-  }
-
-  view fn get_fee_tick_spacing(fee: u64): u64 {
-    require(fee > 0, "FEE-POS")
-    return self.fee_tick_spacing[fee]
   }
 }

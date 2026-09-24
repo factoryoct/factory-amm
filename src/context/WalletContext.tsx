@@ -36,7 +36,7 @@ try {
   if (localStorage.getItem('oct_contracts_ver') !== CONTRACTS_VER) {
     for (const k of ['oct_factory_addr', 'oct_fact_addr', 'oct_pool_addr', 'oct_woct_addr',
       'oct_router_addr', 'oct_quoter_addr', 'oct_multihop_addr', 'oct_swaphelper_addr',
-      'oct_faucet_addr', 'oct_tokenmeta_addr', 'oct_oracle_addr',
+      'oct_tokenmeta_addr', 'oct_oracle_addr',
       ]) localStorage.removeItem(k)
     localStorage.removeItem('oct_pools_v2')
     localStorage.removeItem('oct_pools_cache_v1')
@@ -47,7 +47,7 @@ try {
 } catch {  }
 
 function resolveContracts() {
-  let factOverride = '', poolOverride = '', woctOverride = '', routerOverride = '', quoterOverride = '', factoryOverride = '', faucetOverride = '', multihopOverride = '', swaphelperOverride = '', tokenMetaOverride = '', oracleOverride = ''
+  let factOverride = '', poolOverride = '', woctOverride = '', routerOverride = '', quoterOverride = '', factoryOverride = '', multihopOverride = '', swaphelperOverride = '', tokenMetaOverride = '', oracleOverride = ''
   try {
     factoryOverride = localStorage.getItem('oct_factory_addr') || ''
     factOverride    = localStorage.getItem('oct_fact_addr')    || ''
@@ -57,10 +57,6 @@ function resolveContracts() {
     quoterOverride  = localStorage.getItem('oct_quoter_addr')  || ''
     multihopOverride = localStorage.getItem('oct_multihop_addr') || ''
     swaphelperOverride = localStorage.getItem('oct_swaphelper_addr') || ''
-    faucetOverride  = localStorage.getItem('oct_faucet_addr')  || ''
-    if (faucetOverride === 'oct9cTkjaDwihdqBmP6YXP8QK4uZ9Pstac59coPTdczXSsV') {
-      localStorage.removeItem('oct_faucet_addr'); faucetOverride = ''
-    }
     tokenMetaOverride = localStorage.getItem('oct_tokenmeta_addr') || ''
     oracleOverride = localStorage.getItem('oct_oracle_addr') || ''
   } catch {  }
@@ -73,7 +69,6 @@ function resolveContracts() {
     pool:            poolOverride    || 'oct9dmE4kmoyeUzbKmk27GCgczGbv2MqKotDbmyvCAz182V',
     woct:            woctOverride    || 'oct4NZL1b4WoGoCtuNNyB6vtngmmvkfGHCYjkwgugX7AmsB',
     fact:            factOverride    || 'oct8mCmYaMFN7LUDJwti87G6dXEdJraswXTzU4UfQ7LTF2W',
-    faucet:          faucetOverride  || 'octEmbEEJ4zdwUacJNUa6fjFuwpBmWUd3g3i3xFFUUeEumo',
     tokenMeta:       tokenMetaOverride || 'octFjuYgpjxWpqHxhXiDnDBR3guveGcET7TnsThby67Jmyf',
     oracle:          oracleOverride || 'octBcrSMH47GWzEMkcQsnTzVoUoukxJpC2kqqYwiUE8FQEf',
   }
@@ -82,7 +77,7 @@ export function spoofedAddresses(): string[] {
   const keys: Record<string, string> = {
     oct_factory_addr: 'factory', oct_router_addr: 'router', oct_quoter_addr: 'quoter',
     oct_multihop_addr: 'multihop', oct_swaphelper_addr: 'swaphelper', oct_pool_addr: 'pool',
-    oct_woct_addr: 'woct', oct_fact_addr: 'FACT', oct_faucet_addr: 'faucet',
+    oct_woct_addr: 'woct', oct_fact_addr: 'FACT',
     oct_tokenmeta_addr: 'token meta', oct_oracle_addr: 'oracle',
   }
   const have: string[] = []

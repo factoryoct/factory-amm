@@ -119,6 +119,15 @@ contract Router {
   }
 
 
+  
+  private fn leg(pool: string, recipient: address, zfo_int: int, rem: int, limit: int, z4o: bool): (int, int) {
+    if rem <= 0 { return (0, 0) }
+    let s  = call(pool, "swap", recipient, zfo_int, rem, limit)
+    let r0 = to_int(part(s, 0))
+    let r1 = to_int(part(s, 1))
+    return (in_amount(r0, r1, z4o), out_amount(r0, r1, z4o))
+  }
+
   private fn find_pool(token0: address, token1: address, fee: int): string {
     require(to_int(call(self.factory, "has_canonical_pool", token0, token1, fee)) == 1, "NO_POOL")
     return call(self.factory, "get_canonical", token0, token1, fee)
@@ -197,17 +206,23 @@ contract Router {
 
     call(token_in, "pull", caller, pool, amount_in)
 
-    let swapped = call(pool, "swap", recipient, zfo_int, amount_in, limit)
-    let raw0 = to_int(part(swapped, 0))
-    let raw1 = to_int(part(swapped, 1))
+    
+    let full = to_int(amount_in)
+    let (i1, o1) = leg(pool, recipient, zfo_int, full, limit, zero_for_one)
+    let (i2, o2) = leg(pool, recipient, zfo_int, full - i1, limit, zero_for_one)
+    let (i3, o3) = leg(pool, recipient, zfo_int, full - i1 - i2, limit, zero_for_one)
+    let (i4, o4) = leg(pool, recipient, zfo_int, full - i1 - i2 - i3, limit, zero_for_one)
+    let (i5, o5) = leg(pool, recipient, zfo_int, full - i1 - i2 - i3 - i4, limit, zero_for_one)
+    let (i6, o6) = leg(pool, recipient, zfo_int, full - i1 - i2 - i3 - i4 - i5, limit, zero_for_one)
 
-    let amount_out = out_amount(raw0, raw1, zero_for_one)
+    let taken_in   = i1 + i2 + i3 + i4 + i5 + i6
+    let amount_out = o1 + o2 + o3 + o4 + o5 + o6
 
     
     require(amount_out > 0, "OUT0")
 
     
-    require(in_amount(raw0, raw1, zero_for_one) == to_int(amount_in), "PART")
+    require(taken_in == to_int(amount_in), "PART")
 
     require(amount_out >= amount_out_minimum, "SL")
 
@@ -248,12 +263,20 @@ contract Router {
     call(token_in, "pull", caller, pool, amount_in)
 
 
-    let swapped = call(pool, "swap", recipient, zfo_int, amount_in, limit)
-    let raw0 = to_int(part(swapped, 0))
-    let raw1 = to_int(part(swapped, 1))
+    
+    let (j1, p1) = leg(pool, recipient, zfo_int, amount_in, limit, zero_for_one)
+    let (j2, p2) = leg(pool, recipient, zfo_int, amount_in - j1, limit, zero_for_one)
+    let (j3, p3) = leg(pool, recipient, zfo_int, amount_in - j1 - j2, limit, zero_for_one)
+    let (j4, p4) = leg(pool, recipient, zfo_int, amount_in - j1 - j2 - j3, limit, zero_for_one)
+    let (j5, p5) = leg(pool, recipient, zfo_int, amount_in - j1 - j2 - j3 - j4, limit, zero_for_one)
+    let (j6, p6) = leg(pool, recipient, zfo_int, amount_in - j1 - j2 - j3 - j4 - j5, limit, zero_for_one)
 
-    let delivered = out_amount(raw0, raw1, zero_for_one)
+    let taken_out = j1 + j2 + j3 + j4 + j5 + j6
+    let delivered = p1 + p2 + p3 + p4 + p5 + p6
     require(delivered >= amount_out, "OUT")
+
+    
+    require(taken_out == amount_in, "PART")
 
     emit SwapExecuted(caller, recipient, token_in, token_out, amount_in, delivered)
     return amount_in

@@ -176,11 +176,12 @@ contract Quoter {
     limit:  int,
     fee:    int,
     depth:  int
-  ): (int, int) {
-    if amtRem <= 0  { return (accOut, sqrtP) }
-    if sqrtP == limit { return (accOut, sqrtP) }
-    if liq <= 0     { return (accOut, sqrtP) }
-    if depth <= 0   { return (accOut, sqrtP) }
+  ): (int, int, int, int, int, int) {
+    
+    if amtRem <= 0  { return (accOut, sqrtP, tick, liq, amtRem, 0) }
+    if sqrtP == limit { return (accOut, sqrtP, tick, liq, amtRem, 1) }
+    if liq <= 0     { return (accOut, sqrtP, tick, liq, amtRem, 2) }
+    if depth <= 0   { return (accOut, sqrtP, tick, liq, amtRem, 3) }
 
     let nt = call(pool, "get_next_tick", tick, b2i(z4o))
     let tick_next = to_int(part(nt, 0))
@@ -198,6 +199,39 @@ contract Quoter {
     let (new_liq, new_tick) = do_cross(pool, crossed, liq, tick, tick_next, z4o)
 
     return sim_loop(pool, new_sqrtP, new_tick, new_liq, new_amtRem, new_accOut, z4o, limit, fee, depth - 1)
+  }
+
+  
+  view fn sim_chunk(
+    pool:   string,
+    sqrtP:  int,
+    tick:   int,
+    liq:    int,
+    amtRem: int,
+    accOut: int,
+    z4o:    u64,
+    limit:  int
+  ): (int, int, int, int, int, int) {
+    
+    let cfg = call(pool, "get_config")
+    let fee = to_int(part(cfg, 0))
+    return sim_loop(pool, sqrtP, tick, liq, amtRem, accOut, z4o != 0, limit, fee, 4)
+  }
+
+  
+  view fn sim_out_chunk(
+    pool:   string,
+    sqrtP:  int,
+    tick:   int,
+    liq:    int,
+    amtRem: int,
+    accIn:  int,
+    z4o:    u64,
+    limit:  int
+  ): (int, int, int, int, int, int) {
+    let cfg = call(pool, "get_config")
+    let fee = to_int(part(cfg, 0))
+    return sim_out_loop(pool, sqrtP, tick, liq, amtRem, accIn, z4o != 0, limit, fee, 4)
   }
 
 
@@ -227,7 +261,22 @@ contract Quoter {
     require(liq > 0, "NL")
 
     let limit               = get_limit(zero_for_one, sqrt_price_limit)
-    let (out, final_sqrt)   = sim_loop(pool, sqrtP, tick, liq, amount_in, 0, zero_for_one, limit, fee, 8)
+    
+    let me  = self_addr
+    let z4i = b2i(zero_for_one)
+    let c1 = call(me, "sim_chunk", pool, sqrtP, tick, liq, amount_in, 0, z4i, limit)
+    let c2 = call(me, "sim_chunk", pool, to_int(part(c1, 1)), to_int(part(c1, 2)), to_int(part(c1, 3)), to_int(part(c1, 4)), to_int(part(c1, 0)), z4i, limit)
+    let c3 = call(me, "sim_chunk", pool, to_int(part(c2, 1)), to_int(part(c2, 2)), to_int(part(c2, 3)), to_int(part(c2, 4)), to_int(part(c2, 0)), z4i, limit)
+    let c4 = call(me, "sim_chunk", pool, to_int(part(c3, 1)), to_int(part(c3, 2)), to_int(part(c3, 3)), to_int(part(c3, 4)), to_int(part(c3, 0)), z4i, limit)
+    let c5 = call(me, "sim_chunk", pool, to_int(part(c4, 1)), to_int(part(c4, 2)), to_int(part(c4, 3)), to_int(part(c4, 4)), to_int(part(c4, 0)), z4i, limit)
+    let c6 = call(me, "sim_chunk", pool, to_int(part(c5, 1)), to_int(part(c5, 2)), to_int(part(c5, 3)), to_int(part(c5, 4)), to_int(part(c5, 0)), z4i, limit)
+    let out        = to_int(part(c6, 0))
+    let final_sqrt = to_int(part(c6, 1))
+    let why        = to_int(part(c6, 5))
+    let left_in    = to_int(part(c6, 4))
+    
+    require(why != 3, "DEPTH")
+    require(left_in <= 0, "LIQ")
     let price_impact        = abs_val(final_sqrt - sqrtP) * 10000 / sqrtP
 
     return (out, final_sqrt, price_impact)
@@ -307,11 +356,12 @@ contract Quoter {
     limit:  int,
     fee:    int,
     depth:  int
-  ): (int, int) {
-    if amtRem == 0  { return (accIn, sqrtP) }
-    if sqrtP == limit { return (accIn, sqrtP) }
-    if liq <= 0     { return (accIn, sqrtP) }
-    if depth <= 0   { return (accIn, sqrtP) }
+  ): (int, int, int, int, int, int) {
+    
+    if amtRem == 0  { return (accIn, sqrtP, tick, liq, amtRem, 0) }
+    if sqrtP == limit { return (accIn, sqrtP, tick, liq, amtRem, 1) }
+    if liq <= 0     { return (accIn, sqrtP, tick, liq, amtRem, 2) }
+    if depth <= 0 { return (accIn, sqrtP, tick, liq, amtRem, 3) }
 
     let nt = call(pool, "get_next_tick", tick, b2i(z4o))
     let tick_next = to_int(part(nt, 0))
@@ -350,7 +400,19 @@ contract Quoter {
 
     let limit               = get_limit(zero_for_one, sqrt_price_limit)
     let neg_out             = 0 - amount_out
-    let (accIn, final_sqrt) = sim_out_loop(pool, sqrtP, tick, liq, neg_out, 0, zero_for_one, limit, fee, 8)
+    
+    let me  = self_addr
+    let z4i = b2i(zero_for_one)
+    let d1 = call(me, "sim_out_chunk", pool, sqrtP, tick, liq, neg_out, 0, z4i, limit)
+    let d2 = call(me, "sim_out_chunk", pool, to_int(part(d1, 1)), to_int(part(d1, 2)), to_int(part(d1, 3)), to_int(part(d1, 4)), to_int(part(d1, 0)), z4i, limit)
+    let d3 = call(me, "sim_out_chunk", pool, to_int(part(d2, 1)), to_int(part(d2, 2)), to_int(part(d2, 3)), to_int(part(d2, 4)), to_int(part(d2, 0)), z4i, limit)
+    let d4 = call(me, "sim_out_chunk", pool, to_int(part(d3, 1)), to_int(part(d3, 2)), to_int(part(d3, 3)), to_int(part(d3, 4)), to_int(part(d3, 0)), z4i, limit)
+    let d5 = call(me, "sim_out_chunk", pool, to_int(part(d4, 1)), to_int(part(d4, 2)), to_int(part(d4, 3)), to_int(part(d4, 4)), to_int(part(d4, 0)), z4i, limit)
+    let d6 = call(me, "sim_out_chunk", pool, to_int(part(d5, 1)), to_int(part(d5, 2)), to_int(part(d5, 3)), to_int(part(d5, 4)), to_int(part(d5, 0)), z4i, limit)
+    let accIn = to_int(part(d6, 0))
+    let left  = to_int(part(d6, 4))
+    
+    require(left == 0, "DEPTH")
     return accIn
   }
 
