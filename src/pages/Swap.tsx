@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback, useRef } from 'react'
 import { useWallet, CONTRACTS } from '../context/WalletContext'
-import { getEpochId, contractCallTuple, contractCallView, getOctMarket, getReceipt, getTxStatus, getRecommendedFee, submitMultiExec, BATCH_LIMIT, type MultiExecCall, lastOctPrice } from '../utils/rpc'
+import { getEpochId, contractCallTuple, contractCallView, getOctMarket, getReceipt, getTxStatus, getRecommendedFee, submitMultiExec, type MultiExecCall, lastOctPrice } from '../utils/rpc'
 import { listTokens, onTokensChanged, duplicateSymbols } from '../config/tokens'
 import { spendableNative, formatBaseUnits } from '../utils/gas'
 import { getTokenPriceUsd, getTokenPricesUsd } from '../utils/price'

@@ -751,7 +751,7 @@ export default function AddLiquidity() {
                   current price
                 </div>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                  <span style={{
+                  <span className="price-now" style={{
                     fontFamily: 'var(--oct-type-mono)', fontSize: 30, fontWeight: 500,
                     letterSpacing: '-0.02em', color: 'var(--oct-color-text)', lineHeight: 1.1,
                   }}>{formatNumber(currentPrice, 6)}</span>

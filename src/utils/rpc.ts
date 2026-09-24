@@ -274,7 +274,7 @@ export interface MultiExecCall {
   amount?: string
 }
 
-export const BATCH_LIMIT = 8
+const BATCH_LIMIT = 8
 
 export async function submitMultiExec(calls: MultiExecCall[], _ou = '8000', _pin = ''): Promise<string> {
   const octra = getOctra()

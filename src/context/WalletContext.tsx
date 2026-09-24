@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react'
 import { wallet, initWallet } from '../wallet'
 import { submitCallTx, getBalance } from '../utils/rpc'
 import { getOctra, octraAvailable, waitForOctra } from '../utils/walletOctra'

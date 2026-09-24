@@ -17,5 +17,3 @@ export async function initWallet(): Promise<boolean> {
   })
   return _initPromise
 }
-
-type Param = string | number | boolean

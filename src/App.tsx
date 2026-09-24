@@ -66,7 +66,7 @@ function Drawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
     <>
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(13,22,38,.4)', zIndex: 70 }} />
-      <div style={{ position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 71, boxShadow: 'var(--sh-lg)' }}>
+      <div style={{ position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 71, boxShadow: 'var(--sh-lg)', background: 'var(--oct-color-surface)' }}>
         <Sidebar onNavigate={onClose} />
       </div>
     </>
@@ -104,10 +104,6 @@ function Shell() {
             <Route path="/positions"               element={<MyPositions />} />
             <Route path="/leaderboard"             element={<Leaderboard />} />
             <Route path="/protocol"                element={<Protocol />} />
-            <Route path="/launchpad"               element={<Navigate to="/" replace />} />
-            <Route path="/vault"                   element={<Navigate to="/" replace />} />
-            <Route path="/private"                 element={<Navigate to="/" replace />} />
-            <Route path="/inbox"                   element={<Navigate to="/" replace />} />
             <Route path="*"                        element={<Navigate to="/" replace />} />
           </Routes>
           </Suspense>

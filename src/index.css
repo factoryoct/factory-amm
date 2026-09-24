@@ -7,7 +7,6 @@
   --oct-color-bg:           #ffffff;
   --oct-color-surface-soft: #f2f3f5;
   --oct-color-surface:      #eff0f3;
-  --oct-color-header:       #ffffff;
   --oct-color-raised:       #ffffff;
   --oct-color-surface-hot:  #e8e9ec;
 
@@ -34,25 +33,19 @@
   --oct-color-action-off-ink: #7b93b4;
 
   --oct-color-success:      #0e9f6e;
-  --oct-color-success-soft: #e7f7f1;
   --oct-color-warning:      #b4740b;
-  --oct-color-warning-soft: #fefce8;
   --oct-color-danger:       #e02424;
   --oct-color-danger-soft:  #fdecec;
 
   --oct-type-ui:            "Hanken Grotesk", "Segoe UI", system-ui, sans-serif;
   --oct-type-display:       "Space Grotesk", "Hanken Grotesk", system-ui, sans-serif;
   --oct-type-mono:          "JetBrains Mono", "SF Mono", Consolas, monospace;
-  --oct-type-size-01:       12px;
-  --oct-type-size-02:       13px;
-  --oct-type-size-03:       15px;
   --oct-letter-space:       0px;
 
   --r-xs: 10px;
   --r-sm: 12px;
   --r-md: 16px;
   --r-lg: 22px;
-  --r-xl: 28px;
 
   --sh-sm: 0 1px 2px rgba(23, 33, 61, .045), 0 1px 1px rgba(23, 33, 61, .03);
   --sh-md: 0 2px 4px rgba(23, 33, 61, .04), 0 10px 24px -8px rgba(23, 33, 61, .10);
@@ -68,7 +61,6 @@
   --oct-color-surface-soft: #1b1e22;
   --oct-color-bg:           #15181b;
   --oct-color-surface:      #101214;
-  --oct-color-header:       #15181b;
   --oct-color-raised:       #22262b;
   --oct-color-surface-hot:  #1a1d21;
 
@@ -94,9 +86,7 @@
   --oct-color-action-off-ink: #7d93b0;
 
   --oct-color-success:      #57c98b;
-  --oct-color-success-soft: rgba(87, 201, 139, .14);
   --oct-color-warning:      #d6a45a;
-  --oct-color-warning-soft: rgba(214, 164, 90, .14);
   --oct-color-danger:       #e06a6a;
   --oct-color-danger-soft:  rgba(224, 106, 106, .14);
 
@@ -160,31 +150,17 @@ body {
   .pts-head > div, .pts-bd > div { text-align: left !important; }
   .m-scroll { overflow-x: auto !important; -webkit-overflow-scrolling: touch; max-width: 100%; }
   .m-scroll > * { max-width: none !important; min-width: 520px; }
-  main .m-keep[style*="grid-template-columns"], .m-scroll [style*="grid-template-columns"] { grid-template-columns: revert !important; }
-
-  .app-header { gap: 4px !important; }
-
-  .app-logo { padding-right: 10px !important; margin-right: 0 !important; }
-  .app-header > *:last-child { flex-shrink: 0; }
+  .m-scroll [style*="grid-template-columns"] { grid-template-columns: revert !important; }
 
   .recharts-responsive-container, .recharts-wrapper, .recharts-surface { max-width: 100% !important; }
 
   .chart-area *:not(svg):not(path) { max-width: none !important; }
 
-  .app-header { padding: 0 14px !important; }
-  .app-nav-inline { display: none !important; }
-  .app-burger { display: inline-block !important; }
-
-  .app-page { padding: 20px 12px !important; }
-
   .app-sidebar { display: none !important; }
 
   .app-token-modal { width: 340px !important; max-width: 88vw !important; }
-  .m-modal { width: 100% !important; max-width: 94vw !important; max-height: 90dvh !important; overflow-y: auto !important; overscroll-behavior: contain; }
-}
-@media (min-width: 769px) {
-  .app-burger { display: none !important; }
-  .app-nav-dropdown { display: none !important; }
+
+  .price-now { font-size: 22px !important; overflow-wrap: normal !important; word-break: keep-all !important; }
 }
 
 body {
@@ -217,14 +193,11 @@ a { transition: color .16s ease; }
 
 ::selection { background: var(--oct-color-primary-soft); color: var(--oct-color-primary-deep); }
 
-@keyframes oct-blink { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
-
 @keyframes oct-pulse {
   0%   { transform: scale(1);   opacity: .55 }
   70%  { transform: scale(2.6); opacity: 0 }
   100% { transform: scale(2.6); opacity: 0 }
 }
-.oct-blink { animation: oct-blink 1.2s ease-in-out infinite; }
 
 .font-mono, code, .mono,
 input[type="number"] {
@@ -400,16 +373,7 @@ input::placeholder, textarea::placeholder {
   -webkit-backdrop-filter: blur(2px);
 }
 
-.page-title {
-  font-family: var(--oct-type-display);
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--oct-color-text);
-  line-height: 1.15;
-}
-
-h1, h2, h3, .page-title {
+h1, h2, h3 {
   font-family: var(--oct-type-display);
   letter-spacing: -0.01em;
 }
@@ -431,6 +395,7 @@ h2, h3 { line-height: 1.2; }
 }
 @media (max-width: 1080px) {
   .swap-grid { grid-template-columns: minmax(0, 1fr); max-width: 520px; }
+  .swap-grid > aside { grid-area: 3 / 1 !important; }
 }
 
 body {
